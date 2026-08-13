@@ -39,6 +39,8 @@ global g_RadialItems := []
 global g_RadialRadius := 150
 global g_RadialDeadZone := 42
 global g_RadialItemSize := 104
+global g_RadialControlHwnds := []
+global g_RadialCenterControlHwnd := 0
 
 ; =======================================================
 ; 🚀 2. 动态注册所有快捷键
@@ -349,7 +351,11 @@ CollectRadialItems() {
 
 ShowRadialMenu() {
     global g_RadialItems, g_RadialCenterX, g_RadialCenterY, g_RadialRadius, g_RadialItemSize
+    global g_RadialControlHwnds, g_RadialCenterControlHwnd
+    global RadialControlHwnd, RadialCenterControlHwnd
 
+    g_RadialControlHwnds := []
+    g_RadialCenterControlHwnd := 0
     menuSize := g_RadialRadius * 2 + g_RadialItemSize + 30
     halfSize := Floor(menuSize / 2)
     menuX := g_RadialCenterX - halfSize
@@ -371,13 +377,15 @@ ShowRadialMenu() {
         x := Round(center + Cos(radian) * g_RadialRadius - g_RadialItemSize / 2)
         y := Round(center + Sin(radian) * g_RadialRadius - 27)
         label := "[" . item.key . "] " . item.app . "`n" . item.title
-        Gui, Radial:Add, Text, x%x% y%y% w%g_RadialItemSize% h54 Center vRadialItem%A_Index% Border, %label%
+        Gui, Radial:Add, Text, x%x% y%y% w%g_RadialItemSize% h54 Center hwndRadialControlHwnd Border, %label%
+        g_RadialControlHwnds.Push(RadialControlHwnd)
     }
 
     centerLabelX := center - 60
     centerLabelY := center - 21
     Gui, Radial:Font, s10 cFFFFFF w700, Microsoft YaHei
-    Gui, Radial:Add, Text, x%centerLabelX% y%centerLabelY% w120 h42 Center vRadialCenterText, 移动鼠标选择
+    Gui, Radial:Add, Text, x%centerLabelX% y%centerLabelY% w120 h42 Center hwndRadialCenterControlHwnd, 移动鼠标选择
+    g_RadialCenterControlHwnd := RadialCenterControlHwnd
     Gui, Radial:Show, NoActivate x%menuX% y%menuY% w%menuSize% h%menuSize%
     WinSet, Transparent, 235, ahk_id %radialHwnd%
 }
@@ -409,20 +417,22 @@ UpdateRadialSelection() {
 }
 
 UpdateRadialHighlight() {
-    global g_RadialItems, g_RadialSelected
+    global g_RadialItems, g_RadialSelected, g_RadialControlHwnds, g_RadialCenterControlHwnd
 
-    Loop, % g_RadialItems.Length() {
+    Loop, % g_RadialControlHwnds.Length() {
+        controlHwnd := g_RadialControlHwnds[A_Index]
         if (A_Index == g_RadialSelected)
-            GuiControl, Radial:+c66D9EF, RadialItem%A_Index%
+            GuiControl, Radial:+c66D9EF, %controlHwnd%
         else
-            GuiControl, Radial:+cC8D0DC, RadialItem%A_Index%
+            GuiControl, Radial:+cC8D0DC, %controlHwnd%
     }
 
     if (g_RadialSelected) {
         item := g_RadialItems[g_RadialSelected]
-        GuiControl, Radial:, RadialCenterText, % "[" . item.key . "]`n" . item.app
+        centerText := "[" . item.key . "]`n" . item.app
+        GuiControl, Radial:, %g_RadialCenterControlHwnd%, %centerText%
     } else {
-        GuiControl, Radial:, RadialCenterText, 移动鼠标选择
+        GuiControl, Radial:, %g_RadialCenterControlHwnd%, 移动鼠标选择
     }
 }
 
