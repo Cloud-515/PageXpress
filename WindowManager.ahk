@@ -1,7 +1,10 @@
 ﻿#NoEnv
 #SingleInstance Force
 SendMode Input
-SetBatchLines, -1  
+SetBatchLines, -1
+CoordMode, Mouse, Screen
+CoordMode, Pixel, Screen
+CoordMode, ToolTip, Screen
 
 ; =======================================================
 ; 📂 1. 初始化与配置文件读取 (config.ini)
@@ -48,6 +51,7 @@ global g_RadialDeadZone := g_RadialInnerRadius
 global g_RadialHwnd := 0
 global g_RadialSectorHwnds := []
 global g_RadialCenterControlHwnd := 0
+global g_RadialIgnoreCursorDelta := false
 
 ; =======================================================
 ; 🚀 2. 动态注册所有快捷键
@@ -315,7 +319,7 @@ RadialHandler:
         return
     }
 
-    MouseGetPos, g_RadialCenterX, g_RadialCenterY
+    GetCursorScreenPos(g_RadialCenterX, g_RadialCenterY)
     g_RadialVirtualX := 0
     g_RadialVirtualY := 0
     g_RadialSelected := 0
@@ -324,7 +328,7 @@ RadialHandler:
     SetTimer, RadialSelectionTimer, 16
     KeyWait, %RadialPhysicalKey%
     SetTimer, RadialSelectionTimer, Off
-    MouseMove, %g_RadialCenterX%, %g_RadialCenterY%, 0
+    SetCursorScreenPos(g_RadialCenterX, g_RadialCenterY)
     DestroyRadialMenu()
     g_RadialOpen := false
 
@@ -392,6 +396,7 @@ ShowRadialMenu() {
     Gui, RadialCenter:Show, NoActivate x%centerX% y%centerY% w%g_RadialPreviewWidth% h%g_RadialPreviewHeight%
     WinSet, Region, 0-0 w%g_RadialPreviewWidth% h%g_RadialPreviewHeight% R8-8, ahk_id %g_RadialHwnd%
     WinSet, Transparent, 245, ahk_id %g_RadialHwnd%
+    CalibrateRadialLayers(menuX, menuY, diameter)
 }
 
 CreateRadialSector(index, menuX, menuY, diameter, center, startAngle, sweepAngle, color) {
@@ -438,6 +443,41 @@ SetPolygonWindowRegion(hwnd, points) {
     DllCall("SetWindowRgn", "Ptr", hwnd, "Ptr", region, "Int", true)
 }
 
+CalibrateRadialLayers(menuX, menuY, diameter) {
+    global g_RadialCenterX, g_RadialCenterY, g_RadialSectorHwnds, g_RadialHwnd
+
+    firstSectorHwnd := g_RadialSectorHwnds[1]
+    WinGetPos, actualX, actualY, actualW, actualH, ahk_id %firstSectorHwnd%
+    actualCenterX := actualX + actualW / 2
+    actualCenterY := actualY + actualH / 2
+    offsetX := Round(g_RadialCenterX - actualCenterX)
+    offsetY := Round(g_RadialCenterY - actualCenterY)
+
+    Loop, % g_RadialSectorHwnds.Length() {
+        hwnd := g_RadialSectorHwnds[A_Index]
+        WinGetPos, x, y,,, ahk_id %hwnd%
+        MoveWindowBy(hwnd, x + offsetX, y + offsetY)
+    }
+
+    WinGetPos, centerX, centerY,,, ahk_id %g_RadialHwnd%
+    MoveWindowBy(g_RadialHwnd, centerX + offsetX, centerY + offsetY)
+}
+
+MoveWindowBy(hwnd, x, y) {
+    DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", 0, "Int", x, "Int", y, "Int", 0, "Int", 0, "UInt", 0x0015)
+}
+
+GetCursorScreenPos(ByRef x, ByRef y) {
+    VarSetCapacity(point, 8, 0)
+    DllCall("GetCursorPos", "Ptr", &point)
+    x := NumGet(point, 0, "Int")
+    y := NumGet(point, 4, "Int")
+}
+
+SetCursorScreenPos(x, y) {
+    DllCall("SetCursorPos", "Int", x, "Int", y)
+}
+
 DestroyRadialMenu() {
     global g_RadialItems, g_RadialCenterControlHwnd
 
@@ -453,10 +493,10 @@ UpdateRadialSelection() {
     global g_RadialCenterX, g_RadialCenterY, g_RadialVirtualX, g_RadialVirtualY
     global g_RadialInnerRadius, g_RadialOuterRadius, g_RadialItems, g_RadialSelected
 
-    MouseGetPos, mouseX, mouseY
+    GetCursorScreenPos(mouseX, mouseY)
     g_RadialVirtualX += mouseX - g_RadialCenterX
     g_RadialVirtualY += mouseY - g_RadialCenterY
-    MouseMove, %g_RadialCenterX%, %g_RadialCenterY%, 0
+    SetCursorScreenPos(g_RadialCenterX, g_RadialCenterY)
 
     distance := Sqrt(g_RadialVirtualX * g_RadialVirtualX + g_RadialVirtualY * g_RadialVirtualY)
     maxDistance := g_RadialOuterRadius - 4
