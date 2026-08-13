@@ -15,10 +15,12 @@ IniRead, UnbindModifier, %IniFile%, Hotkeys, UnbindModifier, ^+
 IniRead, PinHotkey, %IniFile%, Hotkeys, PinHotkey, !T
 IniRead, SnapshotHotkey, %IniFile%, Hotkeys, SnapshotHotkey, !0
 IniRead, PreviewHotkey, %IniFile%, Hotkeys, PreviewHotkey, !vkC0
+IniRead, RadialHotkey, %IniFile%, Hotkeys, RadialHotkey, !Space
 IniRead, ConfigHotkey, %IniFile%, Hotkeys, ConfigHotkey, ^!vkC0
 
-; 提取预览按键的物理键，供 KeyWait 使用 (剔除修饰符)
-global PreviewPhysicalKey := RegExReplace(PreviewHotkey, "^[\^\!\+\*\$]+", "")
+; 提取按键的物理键，供 KeyWait 使用 (剔除修饰符)
+global PreviewPhysicalKey := RegExReplace(PreviewHotkey, "^[\^\!\+\#\<\>\*\$~]+", "")
+global RadialPhysicalKey := RegExReplace(RadialHotkey, "^[\^\!\+\#\<\>\*\$~]+", "")
 
 global KeyList := ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 global WindowBindings := {}
@@ -29,6 +31,14 @@ global RestoreData_MinMax := {}
 global g_TriggerModifier := TriggerModifier 
 global g_BindModifier := BindModifier
 global g_UnbindModifier := UnbindModifier
+global g_RadialOpen := false
+global g_RadialCenterX := 0
+global g_RadialCenterY := 0
+global g_RadialSelected := 0
+global g_RadialItems := []
+global g_RadialRadius := 150
+global g_RadialDeadZone := 42
+global g_RadialItemSize := 104
 
 ; =======================================================
 ; 🚀 2. 动态注册所有快捷键
@@ -41,6 +51,7 @@ for index, key in KeyList {
 
 Hotkey, $*%SnapshotHotkey%, SnapshotHandler
 Hotkey, $*%PreviewHotkey%, PreviewHandler
+Hotkey, $*%RadialHotkey%, RadialHandler
 Hotkey, $*%PinHotkey%, PinHandler
 Hotkey, %ConfigHotkey%, ShowConfigGUI
 
@@ -69,24 +80,27 @@ ShowConfigGUI:
     Gui, Config:Add, Text, x30 y110, 解绑窗口修饰键:
     Gui, Config:Add, DropDownList, x150 y105 w170 vUI_Unbind, % BuildDDL(g_UnbindModifier)
 
-    Gui, Config:Add, GroupBox, x15 y155 w330 h200, 2. 独立功能快捷键 (AHK语法)
+    Gui, Config:Add, GroupBox, x15 y155 w330 h235, 2. 独立功能快捷键 (AHK语法)
     Gui, Config:Add, Text, x30 y180 w300 cGray, 语法：! = Alt，^ = Ctrl，+ = Shift`n特殊：vkC0 = · 键 (Esc下方波浪号)
-    
+
     Gui, Config:Add, Text, x30 y225, 全局置顶按键:
     Gui, Config:Add, Edit, x150 y220 w170 vUI_Pin, %PinHotkey%
-    
+
     Gui, Config:Add, Text, x30 y255, 记录层级快照:
     Gui, Config:Add, Edit, x150 y250 w170 vUI_Snapshot, %SnapshotHotkey%
-    
+
     Gui, Config:Add, Text, x30 y285, 实时预览面板:
     Gui, Config:Add, Edit, x150 y280 w170 vUI_Preview, %PreviewHotkey%
-    
-    Gui, Config:Add, Text, x30 y315, 弹出本配置页:
-    Gui, Config:Add, Edit, x150 y310 w170 vUI_Config, %ConfigHotkey%
 
-    Gui, Config:Add, Button, x25 y370 w90 h35 gSaveConfig, 保存并重启
-    Gui, Config:Add, Button, x135 y370 w90 h35 gCloseConfig, 取消
-    Gui, Config:Add, Button, x245 y370 w90 h35 gResetConfig, 恢复默认
+    Gui, Config:Add, Text, x30 y315, 鼠标轮盘按键:
+    Gui, Config:Add, Edit, x150 y310 w170 vUI_Radial, %RadialHotkey%
+
+    Gui, Config:Add, Text, x30 y345, 弹出本配置页:
+    Gui, Config:Add, Edit, x150 y340 w170 vUI_Config, %ConfigHotkey%
+
+    Gui, Config:Add, Button, x25 y405 w90 h35 gSaveConfig, 保存并重启
+    Gui, Config:Add, Button, x135 y405 w90 h35 gCloseConfig, 取消
+    Gui, Config:Add, Button, x245 y405 w90 h35 gResetConfig, 恢复默认
 
     Gui, Config:Show, , ⚙️ 快捷键配置中心
 return
@@ -104,6 +118,7 @@ SaveConfig:
     IniWrite, %UI_Pin%, %IniFile%, Hotkeys, PinHotkey
     IniWrite, %UI_Snapshot%, %IniFile%, Hotkeys, SnapshotHotkey
     IniWrite, %UI_Preview%, %IniFile%, Hotkeys, PreviewHotkey
+    IniWrite, %UI_Radial%, %IniFile%, Hotkeys, RadialHotkey
     IniWrite, %UI_Config%, %IniFile%, Hotkeys, ConfigHotkey
     
     ShowOSD("✅ 配置已保存，正在生效...")
@@ -276,7 +291,162 @@ GetAppName(hwnd) {
 }
 
 ; =======================================================
-; 7. 绑定、解绑与核心触发路由
+; 7. 鼠标轮盘窗口切换
+; =======================================================
+RadialHandler:
+    global g_RadialOpen, g_RadialCenterX, g_RadialCenterY, g_RadialSelected
+    global g_RadialItems, g_RadialDeadZone, RadialPhysicalKey
+
+    if (g_RadialOpen)
+        return
+
+    CollectRadialItems()
+    if (g_RadialItems.Length() == 0) {
+        ShowOSD("当前没有可用的窗口绑定")
+        return
+    }
+
+    MouseGetPos, g_RadialCenterX, g_RadialCenterY
+    g_RadialSelected := 0
+    g_RadialOpen := true
+    ShowRadialMenu()
+    SetTimer, RadialSelectionTimer, 16
+    KeyWait, %RadialPhysicalKey%
+    SetTimer, RadialSelectionTimer, Off
+    Gui, Radial:Destroy
+    g_RadialOpen := false
+
+    if (g_RadialSelected)
+        ActivateRadialWindow(g_RadialItems[g_RadialSelected].key)
+return
+
+RadialSelectionTimer:
+    UpdateRadialSelection()
+return
+
+CollectRadialItems() {
+    global KeyList, WindowBindings, WindowIsOverlaid, g_RadialItems
+
+    g_RadialItems := []
+    for index, key in KeyList {
+        hwnd := WindowBindings[key]
+        if (!hwnd)
+            continue
+        if (!WinExist("ahk_id " . hwnd)) {
+            WindowBindings[key] := ""
+            WindowIsOverlaid[key] := ""
+            continue
+        }
+
+        WinGetTitle, title, ahk_id %hwnd%
+        if (title == "")
+            title := "无标题窗口"
+        if (StrLen(title) > 14)
+            title := SubStr(title, 1, 13) . "..."
+        g_RadialItems.Push({key: key, hwnd: hwnd, app: GetAppName(hwnd), title: title})
+    }
+}
+
+ShowRadialMenu() {
+    global g_RadialItems, g_RadialCenterX, g_RadialCenterY, g_RadialRadius, g_RadialItemSize
+
+    menuSize := g_RadialRadius * 2 + g_RadialItemSize + 30
+    halfSize := Floor(menuSize / 2)
+    menuX := g_RadialCenterX - halfSize
+    menuY := g_RadialCenterY - halfSize
+
+    Gui, Radial:Destroy
+    Gui, Radial:+AlwaysOnTop -Caption +ToolWindow +LastFound +E0x20
+    radialHwnd := WinExist()
+    Gui, Radial:Color, 282C34
+    Gui, Radial:Font, s9 cC8D0DC, Microsoft YaHei
+
+    center := halfSize
+    itemCount := g_RadialItems.Length()
+    angleStep := 360 / itemCount
+    Loop, %itemCount% {
+        item := g_RadialItems[A_Index]
+        angle := -90 + (A_Index - 1) * angleStep
+        radian := angle * 0.017453292519943
+        x := Round(center + Cos(radian) * g_RadialRadius - g_RadialItemSize / 2)
+        y := Round(center + Sin(radian) * g_RadialRadius - 27)
+        label := "[" . item.key . "] " . item.app . "`n" . item.title
+        Gui, Radial:Add, Text, x%x% y%y% w%g_RadialItemSize% h54 Center vRadialItem%A_Index% Border, %label%
+    }
+
+    centerLabelX := center - 60
+    centerLabelY := center - 21
+    Gui, Radial:Font, s10 cFFFFFF w700, Microsoft YaHei
+    Gui, Radial:Add, Text, x%centerLabelX% y%centerLabelY% w120 h42 Center vRadialCenterText, 移动鼠标选择
+    Gui, Radial:Show, NoActivate x%menuX% y%menuY% w%menuSize% h%menuSize%
+    WinSet, Transparent, 235, ahk_id %radialHwnd%
+}
+
+UpdateRadialSelection() {
+    global g_RadialCenterX, g_RadialCenterY, g_RadialDeadZone, g_RadialItems, g_RadialSelected
+
+    MouseGetPos, mouseX, mouseY
+    dx := mouseX - g_RadialCenterX
+    dy := mouseY - g_RadialCenterY
+    distance := Sqrt(dx * dx + dy * dy)
+    newSelection := 0
+
+    if (distance >= g_RadialDeadZone) {
+        angle := DllCall("msvcrt\atan2", "Double", dy, "Double", dx, "CDecl Double") * 57.295779513082
+        if (angle < 0)
+            angle += 360
+        angle := Mod(angle + 90, 360)
+        angleStep := 360 / g_RadialItems.Length()
+        newSelection := Floor((angle + angleStep / 2) / angleStep) + 1
+        if (newSelection > g_RadialItems.Length())
+            newSelection := 1
+    }
+
+    if (newSelection != g_RadialSelected) {
+        g_RadialSelected := newSelection
+        UpdateRadialHighlight()
+    }
+}
+
+UpdateRadialHighlight() {
+    global g_RadialItems, g_RadialSelected
+
+    Loop, % g_RadialItems.Length() {
+        if (A_Index == g_RadialSelected)
+            GuiControl, Radial:+c66D9EF, RadialItem%A_Index%
+        else
+            GuiControl, Radial:+cC8D0DC, RadialItem%A_Index%
+    }
+
+    if (g_RadialSelected) {
+        item := g_RadialItems[g_RadialSelected]
+        GuiControl, Radial:, RadialCenterText, % "[" . item.key . "]`n" . item.app
+    } else {
+        GuiControl, Radial:, RadialCenterText, 移动鼠标选择
+    }
+}
+
+ActivateRadialWindow(key) {
+    global WindowBindings, WindowIsOverlaid
+
+    hwnd := WindowBindings[key]
+    if (!hwnd || !WinExist("ahk_id " . hwnd)) {
+        WindowBindings[key] := ""
+        WindowIsOverlaid[key] := ""
+        ShowOSD("目标窗口已关闭，绑定已清理")
+        return
+    }
+
+    WinGet, minMaxState, MinMax, ahk_id %hwnd%
+    if (minMaxState == -1)
+        WinRestore, ahk_id %hwnd%
+    WinSet, AlwaysOnTop, Off, ahk_id %hwnd%
+    WinActivate, ahk_id %hwnd%
+    ShowOSD("窗口已激活: [" . GetDisplayName(key) . "]")
+}
+
+; =======================================================
+; 8. 绑定、解绑与核心触发路由
 ; =======================================================
 BindHandler:
     KeyName := RegExReplace(A_ThisHotkey, "^[\^\!\+\*\$]+", "")
