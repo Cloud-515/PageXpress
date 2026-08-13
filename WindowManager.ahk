@@ -34,12 +34,19 @@ global g_UnbindModifier := UnbindModifier
 global g_RadialOpen := false
 global g_RadialCenterX := 0
 global g_RadialCenterY := 0
+global g_RadialVirtualX := 0
+global g_RadialVirtualY := 0
 global g_RadialSelected := 0
 global g_RadialItems := []
-global g_RadialRadius := 150
-global g_RadialDeadZone := 42
-global g_RadialItemSize := 104
-global g_RadialControlHwnds := []
+global g_RadialOuterRadius := 220
+global g_RadialInnerRadius := 142
+global g_RadialPreviewWidth := 260
+global g_RadialPreviewHeight := 88
+global g_RadialGapDegrees := 2
+global g_RadialMenuPadding := 8
+global g_RadialDeadZone := g_RadialInnerRadius
+global g_RadialHwnd := 0
+global g_RadialSectorHwnds := []
 global g_RadialCenterControlHwnd := 0
 
 ; =======================================================
@@ -309,13 +316,16 @@ RadialHandler:
     }
 
     MouseGetPos, g_RadialCenterX, g_RadialCenterY
+    g_RadialVirtualX := 0
+    g_RadialVirtualY := 0
     g_RadialSelected := 0
     g_RadialOpen := true
     ShowRadialMenu()
     SetTimer, RadialSelectionTimer, 16
     KeyWait, %RadialPhysicalKey%
     SetTimer, RadialSelectionTimer, Off
-    Gui, Radial:Destroy
+    MouseMove, %g_RadialCenterX%, %g_RadialCenterY%, 0
+    DestroyRadialMenu()
     g_RadialOpen := false
 
     if (g_RadialSelected)
@@ -350,57 +360,116 @@ CollectRadialItems() {
 }
 
 ShowRadialMenu() {
-    global g_RadialItems, g_RadialCenterX, g_RadialCenterY, g_RadialRadius, g_RadialItemSize
-    global g_RadialControlHwnds, g_RadialCenterControlHwnd
-    global RadialControlHwnd, RadialCenterControlHwnd
+    global g_RadialItems, g_RadialCenterX, g_RadialCenterY, g_RadialOuterRadius
+    global g_RadialInnerRadius, g_RadialPreviewWidth, g_RadialPreviewHeight, g_RadialGapDegrees, g_RadialMenuPadding
+    global g_RadialHwnd, g_RadialSectorHwnds, g_RadialCenterControlHwnd, RadialCenterControlHwnd
 
-    g_RadialControlHwnds := []
-    g_RadialCenterControlHwnd := 0
-    menuSize := g_RadialRadius * 2 + g_RadialItemSize + 30
-    halfSize := Floor(menuSize / 2)
-    menuX := g_RadialCenterX - halfSize
-    menuY := g_RadialCenterY - halfSize
-
-    Gui, Radial:Destroy
-    Gui, Radial:+AlwaysOnTop -Caption +ToolWindow +LastFound +E0x20
-    radialHwnd := WinExist()
-    Gui, Radial:Color, 282C34
-    Gui, Radial:Font, s9 cC8D0DC, Microsoft YaHei
-
-    center := halfSize
+    DestroyRadialMenu()
+    g_RadialSectorHwnds := []
+    diameter := (g_RadialOuterRadius + g_RadialMenuPadding) * 2
+    menuX := g_RadialCenterX - Floor(diameter / 2)
+    menuY := g_RadialCenterY - Floor(diameter / 2)
+    center := Floor(diameter / 2)
     itemCount := g_RadialItems.Length()
     angleStep := 360 / itemCount
+
     Loop, %itemCount% {
-        item := g_RadialItems[A_Index]
-        angle := -90 + (A_Index - 1) * angleStep
-        radian := angle * 0.017453292519943
-        x := Round(center + Cos(radian) * g_RadialRadius - g_RadialItemSize / 2)
-        y := Round(center + Sin(radian) * g_RadialRadius - 27)
-        label := "[" . item.key . "] " . item.app . "`n" . item.title
-        Gui, Radial:Add, Text, x%x% y%y% w%g_RadialItemSize% h54 Center hwndRadialControlHwnd Border, %label%
-        g_RadialControlHwnds.Push(RadialControlHwnd)
+        sectorIndex := A_Index
+        startAngle := -90 + (sectorIndex - 1) * angleStep + g_RadialGapDegrees / 2
+        sweepAngle := angleStep - g_RadialGapDegrees
+        CreateRadialSector(sectorIndex, menuX, menuY, diameter, center, startAngle, sweepAngle, "3A4658")
     }
 
-    centerLabelX := center - 60
-    centerLabelY := center - 21
-    Gui, Radial:Font, s10 cFFFFFF w700, Microsoft YaHei
-    Gui, Radial:Add, Text, x%centerLabelX% y%centerLabelY% w120 h42 Center hwndRadialCenterControlHwnd, 移动鼠标选择
+    centerX := g_RadialCenterX - Floor(g_RadialPreviewWidth / 2)
+    centerY := g_RadialCenterY - Floor(g_RadialPreviewHeight / 2)
+    Gui, RadialCenter:Destroy
+    Gui, RadialCenter:+AlwaysOnTop -Caption +ToolWindow +LastFound +E0x20
+    g_RadialHwnd := WinExist()
+    Gui, RadialCenter:Color, 202833
+    Gui, RadialCenter:Font, s10 cFFFFFF w700, Microsoft YaHei
+    Gui, RadialCenter:Add, Text, x12 y12 w%g_RadialPreviewWidth% h64 Center hwndRadialCenterControlHwnd, 移动鼠标`n选择窗口
     g_RadialCenterControlHwnd := RadialCenterControlHwnd
-    Gui, Radial:Show, NoActivate x%menuX% y%menuY% w%menuSize% h%menuSize%
-    WinSet, Transparent, 235, ahk_id %radialHwnd%
+    Gui, RadialCenter:Show, NoActivate x%centerX% y%centerY% w%g_RadialPreviewWidth% h%g_RadialPreviewHeight%
+    WinSet, Region, 0-0 w%g_RadialPreviewWidth% h%g_RadialPreviewHeight% R8-8, ahk_id %g_RadialHwnd%
+    WinSet, Transparent, 245, ahk_id %g_RadialHwnd%
+}
+
+CreateRadialSector(index, menuX, menuY, diameter, center, startAngle, sweepAngle, color) {
+    global g_RadialOuterRadius, g_RadialInnerRadius, g_RadialSectorHwnds
+
+    guiName := "RadialSector" . index
+    Gui, %guiName%:Destroy
+    Gui, %guiName%:+AlwaysOnTop -Caption +ToolWindow +LastFound +E0x20
+    sectorHwnd := WinExist()
+    Gui, %guiName%:Color, %color%
+    Gui, %guiName%:Show, NoActivate x%menuX% y%menuY% w%diameter% h%diameter%
+
+    points := BuildAnnularSectorPoints(center, g_RadialOuterRadius, g_RadialInnerRadius, startAngle, sweepAngle)
+    SetPolygonWindowRegion(sectorHwnd, points)
+    g_RadialSectorHwnds.Push(sectorHwnd)
+    WinSet, Transparent, 225, ahk_id %sectorHwnd%
+}
+
+BuildAnnularSectorPoints(center, outerRadius, innerRadius, startAngle, sweepAngle) {
+    pointCount := Max(8, Ceil(sweepAngle / 4))
+    points := []
+    Loop, % pointCount + 1 {
+        angle := startAngle + (A_Index - 1) * sweepAngle / pointCount
+        radian := angle * 0.017453292519943
+        points.Push({x: Round(center + Cos(radian) * outerRadius), y: Round(center + Sin(radian) * outerRadius)})
+    }
+    Loop, % pointCount + 1 {
+        angle := startAngle + sweepAngle - (A_Index - 1) * sweepAngle / pointCount
+        radian := angle * 0.017453292519943
+        points.Push({x: Round(center + Cos(radian) * innerRadius), y: Round(center + Sin(radian) * innerRadius)})
+    }
+    return points
+}
+
+SetPolygonWindowRegion(hwnd, points) {
+    pointBuffer := ""
+    pointSize := 8
+    VarSetCapacity(pointBuffer, points.Length() * pointSize, 0)
+    for index, point in points {
+        NumPut(point.x, pointBuffer, (index - 1) * pointSize, "Int")
+        NumPut(point.y, pointBuffer, (index - 1) * pointSize + 4, "Int")
+    }
+    region := DllCall("CreatePolygonRgn", "Ptr", &pointBuffer, "Int", points.Length(), "Int", 1, "Ptr")
+    DllCall("SetWindowRgn", "Ptr", hwnd, "Ptr", region, "Int", true)
+}
+
+DestroyRadialMenu() {
+    global g_RadialItems, g_RadialCenterControlHwnd
+
+    Loop, % g_RadialItems.Length() {
+        guiName := "RadialSector" . A_Index
+        Gui, %guiName%:Destroy
+    }
+    Gui, RadialCenter:Destroy
+    g_RadialCenterControlHwnd := 0
 }
 
 UpdateRadialSelection() {
-    global g_RadialCenterX, g_RadialCenterY, g_RadialDeadZone, g_RadialItems, g_RadialSelected
+    global g_RadialCenterX, g_RadialCenterY, g_RadialVirtualX, g_RadialVirtualY
+    global g_RadialInnerRadius, g_RadialOuterRadius, g_RadialItems, g_RadialSelected
 
     MouseGetPos, mouseX, mouseY
-    dx := mouseX - g_RadialCenterX
-    dy := mouseY - g_RadialCenterY
-    distance := Sqrt(dx * dx + dy * dy)
-    newSelection := 0
+    g_RadialVirtualX += mouseX - g_RadialCenterX
+    g_RadialVirtualY += mouseY - g_RadialCenterY
+    MouseMove, %g_RadialCenterX%, %g_RadialCenterY%, 0
 
-    if (distance >= g_RadialDeadZone) {
-        angle := DllCall("msvcrt\atan2", "Double", dy, "Double", dx, "CDecl Double") * 57.295779513082
+    distance := Sqrt(g_RadialVirtualX * g_RadialVirtualX + g_RadialVirtualY * g_RadialVirtualY)
+    maxDistance := g_RadialOuterRadius - 4
+    if (distance > maxDistance) {
+        scale := maxDistance / distance
+        g_RadialVirtualX *= scale
+        g_RadialVirtualY *= scale
+        distance := maxDistance
+    }
+
+    newSelection := 0
+    if (distance >= g_RadialInnerRadius) {
+        angle := DllCall("msvcrt\atan2", "Double", g_RadialVirtualY, "Double", g_RadialVirtualX, "CDecl Double") * 57.295779513082
         if (angle < 0)
             angle += 360
         angle := Mod(angle + 90, 360)
@@ -417,23 +486,24 @@ UpdateRadialSelection() {
 }
 
 UpdateRadialHighlight() {
-    global g_RadialItems, g_RadialSelected, g_RadialControlHwnds, g_RadialCenterControlHwnd
+    global g_RadialItems, g_RadialSelected, g_RadialSectorHwnds, g_RadialCenterControlHwnd
 
-    Loop, % g_RadialControlHwnds.Length() {
-        controlHwnd := g_RadialControlHwnds[A_Index]
-        if (A_Index == g_RadialSelected)
-            GuiControl, Radial:+c66D9EF, %controlHwnd%
-        else
-            GuiControl, Radial:+cC8D0DC, %controlHwnd%
+    Loop, % g_RadialItems.Length() {
+        guiName := "RadialSector" . A_Index
+        color := (A_Index == g_RadialSelected) ? "4FC3F7" : "3A4658"
+        Gui, %guiName%:Color, %color%
+        sectorHwnd := g_RadialSectorHwnds[A_Index]
+        opacity := (A_Index == g_RadialSelected) ? 250 : 225
+        WinSet, Transparent, %opacity%, ahk_id %sectorHwnd%
     }
 
     if (g_RadialSelected) {
         item := g_RadialItems[g_RadialSelected]
-        centerText := "[" . item.key . "]`n" . item.app
-        GuiControl, Radial:, %g_RadialCenterControlHwnd%, %centerText%
+        centerText := "[" . item.key . "] " . item.app . "`n" . item.title
     } else {
-        GuiControl, Radial:, %g_RadialCenterControlHwnd%, 移动鼠标选择
+        centerText := "移动鼠标`n选择窗口"
     }
+    GuiControl, RadialCenter:, %g_RadialCenterControlHwnd%, %centerText%
 }
 
 ActivateRadialWindow(key) {
