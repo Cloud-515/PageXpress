@@ -68,6 +68,8 @@ global g_RadialMenuPadding := 8
 global g_RadialDeadZone := g_RadialInnerRadius
 global g_RadialHwnd := 0
 global g_RadialSectorHwnds := []
+global g_RadialSectorLabelHwnds := []
+global g_RadialSectorIconHwnds := []
 global g_RadialAppControlHwnd := 0
 global g_RadialCenterControlHwnd := 0
 global g_RadialIconControlHwnd := 0
@@ -432,11 +434,14 @@ ShowRadialMenu() {
     global g_RadialItems, g_RadialCenterX, g_RadialCenterY, g_RadialOuterRadius
     global g_RadialInnerRadius, g_RadialPreviewWidth, g_RadialPreviewHeight, g_RadialGapDegrees, g_RadialMenuPadding
     global g_RadialNormalColor, g_RadialHwnd, g_RadialSectorHwnds
+    global g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds
     global g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
     global RadialAppControlHwnd, RadialCenterControlHwnd, RadialIconControlHwnd
 
     DestroyRadialMenu()
     g_RadialSectorHwnds := []
+    g_RadialSectorLabelHwnds := []
+    g_RadialSectorIconHwnds := []
     diameter := (g_RadialOuterRadius + g_RadialMenuPadding) * 2
     menuX := g_RadialCenterX - Floor(diameter / 2)
     menuY := g_RadialCenterY - Floor(diameter / 2)
@@ -479,13 +484,42 @@ ShowRadialMenu() {
 
 CreateRadialSector(index, menuX, menuY, diameter, center, startAngle, sweepAngle, color) {
     global g_RadialOuterRadius, g_RadialInnerRadius, g_RadialSectorHwnds
+    global g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds, g_RadialItems
 
     guiName := "RadialSector" . index
     Gui, %guiName%:Destroy
     Gui, %guiName%:+AlwaysOnTop -Caption +ToolWindow +LastFound +E0x20
     sectorHwnd := WinExist()
     Gui, %guiName%:Color, %color%
+    item := g_RadialItems[index]
+    itemCount := g_RadialItems.Length()
+    labelRadius := g_RadialInnerRadius + (g_RadialOuterRadius - g_RadialInnerRadius) * 0.55
+    labelAngle := (startAngle + sweepAngle / 2) * 0.017453292519943
+    labelCenterX := Round(center + Cos(labelAngle) * labelRadius)
+    labelCenterY := Round(center + Sin(labelAngle) * labelRadius)
+    labelWidth := Min(150, Max(58, Round(sweepAngle * 1.65)))
+    labelHeight := itemCount <= 4 ? 52 : (itemCount <= 8 ? 30 : 22)
+    labelX := Round(labelCenterX - labelWidth / 2)
+    labelY := Round(labelCenterY - labelHeight / 2)
+    iconSize := itemCount <= 4 ? 20 : 16
+    iconX := Round(labelCenterX - labelWidth / 2)
+    iconY := Round(labelCenterY - iconSize / 2)
+    Gui, %guiName%:Add, Picture, x%iconX% y%iconY% w%iconSize% h%iconSize% hwndSectorIconHwnd
+    iconSpec := "HICON:*" . GetWindowIcon(item.hwnd)
+    GuiControl, %guiName%:, %SectorIconHwnd%, %iconSpec%
+    Gui, %guiName%:Font, s8 cD8DEE9 w700, Microsoft YaHei
+    if (itemCount <= 4)
+        labelText := "[" . item.key . "] " . item.app . "`n" . item.title
+    else if (itemCount <= 8)
+        labelText := "[" . item.key . "] " . item.app
+    else
+        labelText := "[" . item.key . "]"
+    textX := iconX + iconSize + 3
+    textWidth := labelWidth - iconSize - 3
+    Gui, %guiName%:Add, Text, x%textX% y%labelY% w%textWidth% h%labelHeight% Left +0x200 hwndSectorLabelHwnd, %labelText%
     Gui, %guiName%:Show, NoActivate x%menuX% y%menuY% w%diameter% h%diameter%
+    g_RadialSectorIconHwnds.Push(SectorIconHwnd)
+    g_RadialSectorLabelHwnds.Push(SectorLabelHwnd)
 
     points := BuildAnnularSectorPoints(center, g_RadialOuterRadius, g_RadialInnerRadius, startAngle, sweepAngle)
     SetPolygonWindowRegion(sectorHwnd, points)
@@ -557,13 +591,17 @@ SetCursorScreenPos(x, y) {
 }
 
 DestroyRadialMenu() {
-    global g_RadialItems, g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
+    global g_RadialItems, g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds
+    global g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
+    global g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds
 
     Loop, % g_RadialItems.Length() {
         guiName := "RadialSector" . A_Index
         Gui, %guiName%:Destroy
     }
     Gui, RadialCenter:Destroy
+    g_RadialSectorLabelHwnds := []
+    g_RadialSectorIconHwnds := []
     g_RadialAppControlHwnd := 0
     g_RadialCenterControlHwnd := 0
     g_RadialIconControlHwnd := 0
@@ -609,6 +647,15 @@ UpdateRadialHighlight() {
         sectorHwnd := g_RadialSectorHwnds[A_Index]
         opacity := (A_Index == g_RadialSelected) ? 250 : 225
         WinSet, Transparent, %opacity%, ahk_id %sectorHwnd%
+        labelHwnd := g_RadialSectorLabelHwnds[A_Index]
+        iconHwnd := g_RadialSectorIconHwnds[A_Index]
+        if (A_Index == g_RadialSelected) {
+            GuiControl, %guiName%: +cFFFFFF, %labelHwnd%
+            GuiControl, %guiName%: +cFFFFFF, %iconHwnd%
+        } else {
+            GuiControl, %guiName%: +cD8DEE9, %labelHwnd%
+            GuiControl, %guiName%: +cD8DEE9, %iconHwnd%
+        }
     }
 
     if (g_RadialSelected) {
