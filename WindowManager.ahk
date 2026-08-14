@@ -26,6 +26,7 @@ IniRead, RadialSize, %IniFile%, RadialMenu, Size, 220
 IniRead, RadialNormalColor, %IniFile%, RadialMenu, NormalColor, 3A4658
 IniRead, RadialSelectedColor, %IniFile%, RadialMenu, SelectedColor, 4FC3F7
 IniRead, RadialCenterColor, %IniFile%, RadialMenu, CenterColor, 202833
+IniRead, WindowMenuHotkey, %IniFile%, Hotkeys, WindowMenuHotkey, !M
 IniRead, ConfigHotkey, %IniFile%, Hotkeys, ConfigHotkey, ^!vkC0
 RadialHotkey := NormalizeRadialHotkey(RadialHotkey)
 RadialHotkeyAlt := NormalizeRadialHotkey(RadialHotkeyAlt)
@@ -75,6 +76,10 @@ global g_RadialAppControlHwnd := 0
 global g_RadialCenterControlHwnd := 0
 global g_RadialIconControlHwnd := 0
 global g_RadialIgnoreCursorDelta := false
+global WindowStateByHwnd := {}
+global g_WindowMenuTargetHwnd := 0
+global g_WindowMenuOpen := false
+global g_CamouflageHideDelay := 250
 
 ; =======================================================
 ; 🚀 2. 动态注册所有快捷键
@@ -88,10 +93,12 @@ for index, key in KeyList {
 Hotkey, $*%SnapshotHotkey%, SnapshotHandler
 Hotkey, $*%PreviewHotkey%, PreviewHandler
 Hotkey, $*%RadialHotkey%, RadialHandler
+Hotkey, $*%WindowMenuHotkey%, WindowMenuHandler
 if (RadialHotkeyAlt != RadialHotkey)
     Hotkey, $*%RadialHotkeyAlt%, RadialHandler
 Hotkey, $*%PinHotkey%, PinHandler
 Hotkey, %ConfigHotkey%, ShowConfigGUI
+SetTimer, CamouflageTimer, 50
 
 ; 启动时给出优雅的 OSD 提示，告诉用户如何打开设置
 ShowOSD("🚀 启动成功！按 " . FormatHotkey(ConfigHotkey) . " 打开配置", 2500)
@@ -118,7 +125,7 @@ ShowConfigGUI:
     Gui, Config:Add, Text, x30 y110, 解绑窗口修饰键:
     Gui, Config:Add, DropDownList, x150 y105 w170 vUI_Unbind, % BuildDDL(g_UnbindModifier)
 
-    Gui, Config:Add, GroupBox, x15 y155 w330 h465, 2. 独立功能快捷键与轮盘外观
+    Gui, Config:Add, GroupBox, x15 y155 w330 h565, 2. 独立功能快捷键与轮盘外观
     Gui, Config:Add, Text, x30 y180 w300 cGray, 语法：! = Alt，^ = Ctrl，+ = Shift`n特殊：vkC0 = · 键 (Esc下方波浪号)
 
     Gui, Config:Add, Text, x30 y225, 全局置顶按键:
@@ -159,12 +166,15 @@ ShowConfigGUI:
     Gui, Config:Add, Edit, x150 y540 w100 vUI_RadialCenterColor, %RadialCenterColor%
     Gui, Config:Add, Text, x30 y565 w280 cGray, 填写 6 位十六进制色值，例如 #202833
 
-    Gui, Config:Add, Text, x30 y595, 弹出本配置页:
-    Gui, Config:Add, Edit, x150 y590 w170 vUI_Config, %ConfigHotkey%
+    Gui, Config:Add, Text, x30 y595, 当前窗口控制条:
+    Gui, Config:Add, Edit, x150 y590 w170 vUI_WindowMenu, %WindowMenuHotkey%
 
-    Gui, Config:Add, Button, x25 y655 w90 h35 gSaveConfig, 保存并重启
-    Gui, Config:Add, Button, x135 y655 w90 h35 gCloseConfig, 取消
-    Gui, Config:Add, Button, x245 y655 w90 h35 gResetConfig, 恢复默认
+    Gui, Config:Add, Text, x30 y625, 弹出本配置页:
+    Gui, Config:Add, Edit, x150 y620 w170 vUI_Config, %ConfigHotkey%
+
+    Gui, Config:Add, Button, x25 y685 w90 h35 gSaveConfig, 保存并重启
+    Gui, Config:Add, Button, x135 y685 w90 h35 gCloseConfig, 取消
+    Gui, Config:Add, Button, x245 y685 w90 h35 gResetConfig, 恢复默认
 
     Gui, Config:Show, , ⚙️ 快捷键配置中心
 return
@@ -196,6 +206,7 @@ SaveConfig:
     IniWrite, %UI_RadialNormalColor%, %IniFile%, RadialMenu, NormalColor
     IniWrite, %UI_RadialSelectedColor%, %IniFile%, RadialMenu, SelectedColor
     IniWrite, %UI_RadialCenterColor%, %IniFile%, RadialMenu, CenterColor
+    IniWrite, %UI_WindowMenu%, %IniFile%, Hotkeys, WindowMenuHotkey
 
     ShowOSD("✅ 配置已保存，正在生效...")
     Sleep, 1000
@@ -367,7 +378,234 @@ GetAppName(hwnd) {
 }
 
 ; =======================================================
-; 7. 鼠标轮盘窗口切换
+; 7. 迷彩化与当前窗口控制条
+; =======================================================
+WindowMenuHandler:
+    if (g_RadialOpen)
+        return
+    WinGet, hwnd, ID, A
+    if (!hwnd || IsScriptGui(hwnd)) {
+        ShowOSD("请选择一个普通应用窗口")
+        return
+    }
+    g_WindowMenuTargetHwnd := hwnd
+    EnsureWindowState(hwnd)
+    ShowWindowMenu(hwnd)
+return
+
+CamouflageTimer:
+    CheckCamouflageWindows()
+return
+
+WindowMenuOpacityChanged:
+    Gui, WindowMenu:Submit, NoHide
+    opacity := Round(UI_WindowOpacity * 2.55)
+    SetWindowOpacity(g_WindowMenuTargetHwnd, opacity)
+    GuiControl, WindowMenu:, WindowOpacityValue, % UI_WindowOpacity . "%"
+return
+WindowMenuCamouflage:
+    state := EnsureWindowState(g_WindowMenuTargetHwnd)
+    SetCamouflage(g_WindowMenuTargetHwnd, !state.camouflageEnabled)
+    RefreshWindowMenu()
+return
+WindowMenuTriggerSmall:
+    SetCamouflageSize(g_WindowMenuTargetHwnd, 160, 90)
+    RefreshWindowMenu()
+return
+WindowMenuTriggerMedium:
+    SetCamouflageSize(g_WindowMenuTargetHwnd, 240, 135)
+    RefreshWindowMenu()
+return
+WindowMenuTriggerLarge:
+    SetCamouflageSize(g_WindowMenuTargetHwnd, 320, 180)
+    RefreshWindowMenu()
+return
+WindowMenuTopmost:
+    state := EnsureWindowState(g_WindowMenuTargetHwnd)
+    SetWindowTopmost(g_WindowMenuTargetHwnd, !state.alwaysOnTop)
+    RefreshWindowMenu()
+return
+WindowMenuClose:
+    DestroyWindowMenu()
+return
+
+EnsureWindowState(hwnd) {
+    global WindowStateByHwnd
+
+    if (!WindowStateByHwnd.HasKey(hwnd))
+        WindowStateByHwnd[hwnd] := {opacity: 255, alwaysOnTop: false, camouflageEnabled: false, camouflageHidden: false, triggerWidth: 240, triggerHeight: 135, x: 0, y: 0, width: 0, height: 0, triggerX: 0, triggerY: 0, hoverArmed: true, hideAt: 0}
+    return WindowStateByHwnd[hwnd]
+}
+
+UpdateCamouflageTrigger(hwnd) {
+    global WindowStateByHwnd
+
+    state := EnsureWindowState(hwnd)
+    WinGetPos, x, y, width, height, ahk_id %hwnd%
+    state.x := x, state.y := y, state.width := width, state.height := height
+    state.triggerX := Round(x + (width - state.triggerWidth) / 2)
+    state.triggerY := Round(y + (height - state.triggerHeight) / 2)
+}
+
+SetCamouflageSize(hwnd, width, height) {
+    global WindowStateByHwnd
+
+    state := EnsureWindowState(hwnd)
+    state.triggerWidth := width, state.triggerHeight := height
+    if (WinExist("ahk_id " . hwnd))
+        UpdateCamouflageTrigger(hwnd)
+    ShowOSD("迷彩区域: " . width . " × " . height)
+}
+
+SetWindowOpacity(hwnd, opacity) {
+    global WindowStateByHwnd
+
+    state := EnsureWindowState(hwnd)
+    state.opacity := opacity
+    WinSet, Transparent, %opacity%, ahk_id %hwnd%
+}
+
+SetWindowTopmost(hwnd, enabled) {
+    global WindowStateByHwnd
+
+    state := EnsureWindowState(hwnd)
+    state.alwaysOnTop := enabled
+    setting := enabled ? "On" : "Off"
+    WinSet, AlwaysOnTop, %setting%, ahk_id %hwnd%
+}
+
+SetCamouflage(hwnd, enabled) {
+    global WindowStateByHwnd
+
+    if (!WinExist("ahk_id " . hwnd))
+        return
+    state := EnsureWindowState(hwnd)
+    if (!enabled) {
+        state.camouflageEnabled := false
+        if (state.camouflageHidden) {
+            WinRestore, ahk_id %hwnd%
+            state.camouflageHidden := false
+        }
+        return
+    }
+
+    WinGet, minMax, MinMax, ahk_id %hwnd%
+    if (minMax = -1) {
+        ShowOSD("请先恢复窗口后再启用迷彩化")
+        return
+    }
+    UpdateCamouflageTrigger(hwnd)
+    state.camouflageEnabled := true
+    state.camouflageHidden := true
+    state.hoverArmed := true
+    DestroyWindowMenu()
+    WinMinimize, ahk_id %hwnd%
+    ShowOSD("迷彩化已启用，鼠标进入区域显示，离开后再次隐藏")
+}
+
+RevealCamouflageWindow(hwnd, activate := false) {
+    global WindowStateByHwnd
+
+    if (!WindowStateByHwnd.HasKey(hwnd))
+        return
+    state := WindowStateByHwnd[hwnd]
+    if (!state.camouflageHidden)
+        return
+    WinRestore, ahk_id %hwnd%
+    opacity := state.opacity
+    WinSet, Transparent, %opacity%, ahk_id %hwnd%
+    if (state.alwaysOnTop)
+        WinSet, AlwaysOnTop, On, ahk_id %hwnd%
+    state.camouflageHidden := false
+    if (activate)
+        WinActivate, ahk_id %hwnd%
+}
+
+CheckCamouflageWindows() {
+    global WindowStateByHwnd
+
+    GetCursorScreenPos(mouseX, mouseY)
+    for hwnd, state in WindowStateByHwnd {
+        if (!WinExist("ahk_id " . hwnd)) {
+            WindowStateByHwnd.Delete(hwnd)
+            continue
+        }
+        insideTrigger := mouseX >= state.triggerX && mouseX <= state.triggerX + state.triggerWidth && mouseY >= state.triggerY && mouseY <= state.triggerY + state.triggerHeight
+        if (state.camouflageEnabled && !state.camouflageHidden)
+            UpdateCamouflageTrigger(hwnd)
+        if (state.camouflageHidden && insideTrigger) {
+            RevealCamouflageWindow(hwnd, true)
+            state.hideAt := 0
+        } else if (state.camouflageEnabled && !state.camouflageHidden) {
+            WinGetPos, wx, wy, ww, wh, ahk_id %hwnd%
+            insideWindow := mouseX >= wx - 8 && mouseX <= wx + ww + 8 && mouseY >= wy - 8 && mouseY <= wy + wh + 8
+            if (!insideTrigger && !insideWindow) {
+                if (!state.hideAt)
+                    state.hideAt := A_TickCount + g_CamouflageHideDelay
+                else if (A_TickCount >= state.hideAt) {
+                    state.camouflageHidden := true
+                    state.hideAt := 0
+                    WinMinimize, ahk_id %hwnd%
+                }
+            } else {
+                state.hideAt := 0
+            }
+        }
+    }
+}
+
+ShowWindowMenu(hwnd) {
+    global g_WindowMenuOpen
+
+    DestroyWindowMenu()
+    state := EnsureWindowState(hwnd)
+    WinGetPos, x, y, width, height, ahk_id %hwnd%
+    menuWidth := 560, menuHeight := 112
+    opacityPercent := Round(state.opacity / 2.55)
+    menuX := x + Round((width - menuWidth) / 2)
+    menuY := y + height + 8
+    Gui, WindowMenu:+AlwaysOnTop -Caption +ToolWindow +HwndWindowMenuHwnd
+    Gui, WindowMenu:Color, 202833
+    Gui, WindowMenu:Font, s9 cFFFFFF, Microsoft YaHei
+    Gui, WindowMenu:Add, Text, x12 y8 w180 Center, 透明度
+    Gui, WindowMenu:Add, Text, x205 y8 w110 Center, 迷彩化
+    Gui, WindowMenu:Add, Text, x325 y8 w110 Center, 触发区域
+    Gui, WindowMenu:Add, Text, x445 y8 w100 Center, 置顶
+    Gui, WindowMenu:Add, Slider, x16 y35 w140 h28 Range5-100 ToolTip vUI_WindowOpacity gWindowMenuOpacityChanged, %opacityPercent%
+    Gui, WindowMenu:Add, Text, x160 y38 w32 vWindowOpacityValue, % opacityPercent . "%"
+    camoText := state.camouflageEnabled ? "关闭" : "开启"
+    Gui, WindowMenu:Add, Button, x205 y35 w110 h28 gWindowMenuCamouflage, %camoText%
+    Gui, WindowMenu:Add, Button, x325 y35 w32 h28 gWindowMenuTriggerSmall, S
+    Gui, WindowMenu:Add, Button, x361 y35 w32 h28 gWindowMenuTriggerMedium, M
+    Gui, WindowMenu:Add, Button, x397 y35 w32 h28 gWindowMenuTriggerLarge, L
+    topText := state.alwaysOnTop ? "取消置顶" : "置顶"
+    Gui, WindowMenu:Add, Button, x445 y35 w100 h28 gWindowMenuTopmost, %topText%
+    Gui, WindowMenu:Add, Text, x325 y70 w110 Center cAAB7C4, % state.triggerWidth . " × " . state.triggerHeight
+    Gui, WindowMenu:Add, Button, x528 y5 w22 h20 gWindowMenuClose, ×
+    Gui, WindowMenu:Show, NoActivate x%menuX% y%menuY% w%menuWidth% h%menuHeight%
+    WinSet, Transparent, 235, ahk_id %WindowMenuHwnd%
+    g_WindowMenuOpen := true
+}
+
+RefreshWindowMenu() {
+    global g_WindowMenuTargetHwnd
+    if (g_WindowMenuTargetHwnd && WinExist("ahk_id " . g_WindowMenuTargetHwnd))
+        ShowWindowMenu(g_WindowMenuTargetHwnd)
+}
+
+DestroyWindowMenu() {
+    global g_WindowMenuOpen
+    Gui, WindowMenu:Destroy
+    g_WindowMenuOpen := false
+}
+
+IsScriptGui(hwnd) {
+    WinGetClass, className, ahk_id %hwnd%
+    return (className = "AutoHotkeyGUI")
+}
+
+; =======================================================
+; 8. 鼠标轮盘窗口切换
 ; =======================================================
 RadialHandler:
     global g_RadialOpen, g_RadialCenterX, g_RadialCenterY, g_RadialSelected
@@ -702,6 +940,7 @@ ActivateRadialWindow(key) {
         return
     }
 
+    RevealCamouflageWindow(hwnd, false)
     WinGet, minMaxState, MinMax, ahk_id %hwnd%
     if (minMaxState == -1)
         WinRestore, ahk_id %hwnd%
@@ -749,6 +988,7 @@ TriggerHandler:
     }
 
     WinGet, currentActiveHwnd, ID, A
+    RevealCamouflageWindow(targetHwnd, false)
     isOverlaid := WindowIsOverlaid[KeyName]
 
     if (!isOverlaid) {
