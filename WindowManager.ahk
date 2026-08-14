@@ -27,6 +27,7 @@ IniRead, RadialNormalColor, %IniFile%, RadialMenu, NormalColor, 3A4658
 IniRead, RadialSelectedColor, %IniFile%, RadialMenu, SelectedColor, 4FC3F7
 IniRead, RadialCenterColor, %IniFile%, RadialMenu, CenterColor, 202833
 IniRead, WindowMenuHotkey, %IniFile%, Hotkeys, WindowMenuHotkey, !M
+IniRead, CamouflageEditKey, %IniFile%, Hotkeys, CamouflageEditKey, Shift
 IniRead, ConfigHotkey, %IniFile%, Hotkeys, ConfigHotkey, ^!vkC0
 RadialHotkey := NormalizeRadialHotkey(RadialHotkey)
 RadialHotkeyAlt := NormalizeRadialHotkey(RadialHotkeyAlt)
@@ -79,7 +80,18 @@ global g_RadialIgnoreCursorDelta := false
 global WindowStateByHwnd := {}
 global g_WindowMenuTargetHwnd := 0
 global g_WindowMenuOpen := false
+global g_WindowMenuHwnd := 0
 global g_CamouflageHideDelay := 250
+global g_CamouflageEditKey := CamouflageEditKey
+global g_CamouflageGuiNames := {}
+global g_CamouflageGuiHwnds := {}
+global g_RadialPreviewKey := 0
+global g_RadialPreviewWasMinimized := false
+global g_RadialPreviewHwnd := 0
+global g_RadialPreviewMinMax := 0
+global g_RadialPreviewWasTopmost := false
+global g_RadialPreviewSnapshotIndex := 0
+global g_RadialZOrderSnapshot := []
 
 ; =======================================================
 ; 🚀 2. 动态注册所有快捷键
@@ -98,7 +110,7 @@ if (RadialHotkeyAlt != RadialHotkey)
     Hotkey, $*%RadialHotkeyAlt%, RadialHandler
 Hotkey, $*%PinHotkey%, PinHandler
 Hotkey, %ConfigHotkey%, ShowConfigGUI
-SetTimer, CamouflageTimer, 50
+SetTimer, CamouflageTimer, 30
 
 ; 启动时给出优雅的 OSD 提示，告诉用户如何打开设置
 ShowOSD("🚀 启动成功！按 " . FormatHotkey(ConfigHotkey) . " 打开配置", 2500)
@@ -169,12 +181,14 @@ ShowConfigGUI:
     Gui, Config:Add, Text, x30 y595, 当前窗口控制条:
     Gui, Config:Add, Edit, x150 y590 w170 vUI_WindowMenu, %WindowMenuHotkey%
 
-    Gui, Config:Add, Text, x30 y625, 弹出本配置页:
-    Gui, Config:Add, Edit, x150 y620 w170 vUI_Config, %ConfigHotkey%
+    Gui, Config:Add, Text, x30 y625, 迷彩编辑抑制键:
+    Gui, Config:Add, Edit, x150 y620 w170 vUI_CamouflageEditKey, %CamouflageEditKey%
+    Gui, Config:Add, Text, x30 y655, 弹出本配置页:
+    Gui, Config:Add, Edit, x150 y650 w170 vUI_Config, %ConfigHotkey%
 
-    Gui, Config:Add, Button, x25 y685 w90 h35 gSaveConfig, 保存并重启
-    Gui, Config:Add, Button, x135 y685 w90 h35 gCloseConfig, 取消
-    Gui, Config:Add, Button, x245 y685 w90 h35 gResetConfig, 恢复默认
+    Gui, Config:Add, Button, x25 y715 w90 h35 gSaveConfig, 保存并重启
+    Gui, Config:Add, Button, x135 y715 w90 h35 gCloseConfig, 取消
+    Gui, Config:Add, Button, x245 y715 w90 h35 gResetConfig, 恢复默认
 
     Gui, Config:Show, , ⚙️ 快捷键配置中心
 return
@@ -207,6 +221,7 @@ SaveConfig:
     IniWrite, %UI_RadialSelectedColor%, %IniFile%, RadialMenu, SelectedColor
     IniWrite, %UI_RadialCenterColor%, %IniFile%, RadialMenu, CenterColor
     IniWrite, %UI_WindowMenu%, %IniFile%, Hotkeys, WindowMenuHotkey
+    IniWrite, %UI_CamouflageEditKey%, %IniFile%, Hotkeys, CamouflageEditKey
 
     ShowOSD("✅ 配置已保存，正在生效...")
     Sleep, 1000
@@ -384,6 +399,10 @@ WindowMenuHandler:
     if (g_RadialOpen)
         return
     WinGet, hwnd, ID, A
+    if (g_WindowMenuOpen && g_WindowMenuTargetHwnd = hwnd) {
+        DestroyWindowMenu()
+        return
+    }
     if (!hwnd || IsScriptGui(hwnd)) {
         ShowOSD("请选择一个普通应用窗口")
         return
@@ -395,6 +414,10 @@ return
 
 CamouflageTimer:
     CheckCamouflageWindows()
+    if (IsCamouflageEditKeyDown() && GetKeyState("LButton", "P"))
+        EditCamouflageRegions()
+    else
+        ReleaseCamouflageRegions()
 return
 
 WindowMenuOpacityChanged:
@@ -455,11 +478,30 @@ UnbindWindow(hwnd) {
     ShowOSD("当前窗口已解除绑定")
 }
 
+BuildBindingChoices(hwnd, ByRef occupiedKeys) {
+    global KeyList, WindowBindings
+
+    choices := "无"
+    occupiedKeys := ""
+    for index, key in KeyList {
+        boundHwnd := WindowBindings[key]
+        if (!boundHwnd || boundHwnd = hwnd)
+            choices .= "|" . key
+        else
+            occupiedKeys .= (occupiedKeys = "" ? "" : " ") . key
+    }
+    return choices
+}
+
 BindWindowToKey(hwnd, bindKey) {
-    global KeyList, WindowBindings, WindowIsOverlaid
+    global WindowBindings, WindowIsOverlaid
 
     if (bindKey < "1" || bindKey > "9" || StrLen(bindKey) != 1) {
         ShowOSD("绑定键必须是 1-9")
+        return
+    }
+    if (WindowBindings[bindKey] && WindowBindings[bindKey] != hwnd) {
+        ShowOSD("该绑定键已被其他窗口占用")
         return
     }
     UnbindWindow(hwnd)
@@ -475,7 +517,7 @@ EnsureWindowState(hwnd) {
     global WindowStateByHwnd
 
     if (!WindowStateByHwnd.HasKey(hwnd))
-        WindowStateByHwnd[hwnd] := {opacity: 255, alwaysOnTop: false, camouflageEnabled: false, camouflageHidden: false, triggerWidth: 240, triggerHeight: 135, x: 0, y: 0, width: 0, height: 0, triggerX: 0, triggerY: 0, hoverArmed: true, hideAt: 0}
+        WindowStateByHwnd[hwnd] := {opacity: 255, alwaysOnTop: false, camouflageEnabled: false, camouflageHidden: false, triggerWidth: 240, triggerHeight: 135, x: 0, y: 0, width: 0, height: 0, triggerX: 0, triggerY: 0, hoverArmed: true, hideAt: 0, editX: 0, editY: 0, editWidth: 0, editHeight: 0, dragMode: "", dragStartX: 0, dragStartY: 0, dragStartLeft: 0, dragStartTop: 0, dragStartWidth: 0, dragStartHeight: 0}
     return WindowStateByHwnd[hwnd]
 }
 
@@ -485,14 +527,24 @@ UpdateCamouflageTrigger(hwnd) {
     state := EnsureWindowState(hwnd)
     WinGetPos, x, y, width, height, ahk_id %hwnd%
     state.x := x, state.y := y, state.width := width, state.height := height
-    state.triggerX := Round(x + (width - state.triggerWidth) / 2)
-    state.triggerY := Round(y + (height - state.triggerHeight) / 2)
+    if (!state.editWidth) {
+        state.editX := Round(x + (width - state.triggerWidth) / 2)
+        state.editY := Round(y + (height - state.triggerHeight) / 2)
+        state.editWidth := state.triggerWidth
+        state.editHeight := state.triggerHeight
+    }
+    state.triggerX := state.editX
+    state.triggerY := state.editY
+    state.triggerWidth := state.editWidth
+    state.triggerHeight := state.editHeight
+    UpdateCamouflageRegion(hwnd)
 }
 
 SetCamouflageSize(hwnd, width, height) {
     global WindowStateByHwnd
 
     state := EnsureWindowState(hwnd)
+    state.editWidth := width, state.editHeight := height
     state.triggerWidth := width, state.triggerHeight := height
     if (WinExist("ahk_id " . hwnd))
         UpdateCamouflageTrigger(hwnd)
@@ -517,17 +569,15 @@ SetWindowTopmost(hwnd, enabled) {
 }
 
 SetCamouflage(hwnd, enabled) {
-    global WindowStateByHwnd
+    global WindowStateByHwnd, g_CamouflageEditKey
 
     if (!WinExist("ahk_id " . hwnd))
         return
     state := EnsureWindowState(hwnd)
     if (!enabled) {
         state.camouflageEnabled := false
-        if (state.camouflageHidden) {
-            WinRestore, ahk_id %hwnd%
-            state.camouflageHidden := false
-        }
+        state.camouflageHidden := false
+        DestroyCamouflageRegion(hwnd)
         return
     }
 
@@ -540,9 +590,133 @@ SetCamouflage(hwnd, enabled) {
     state.camouflageEnabled := true
     state.camouflageHidden := true
     state.hoverArmed := true
+    CreateCamouflageRegion(hwnd)
+    HideCamouflageWindow(hwnd)
     DestroyWindowMenu()
+    ShowOSD("迷彩区域已启用，按住 " . g_CamouflageEditKey . " 可编辑")
+}
+
+HideCamouflageWindow(hwnd) {
+    global WindowStateByHwnd
+    state := EnsureWindowState(hwnd)
+    WinGetPos, x, y, w, h, ahk_id %hwnd%
+    state.originalX := x, state.originalY := y, state.originalWidth := w, state.originalHeight := h
     WinMinimize, ahk_id %hwnd%
-    ShowOSD("迷彩化已启用，鼠标进入区域显示，离开后再次隐藏")
+    state.camouflageHidden := true
+}
+
+CreateCamouflageRegion(hwnd) {
+    global WindowStateByHwnd, g_CamouflageGuiNames, g_CamouflageGuiHwnds
+    state := EnsureWindowState(hwnd)
+    guiName := "Camouflage" . hwnd
+    g_CamouflageGuiNames[hwnd] := guiName
+    Gui, %guiName%:Destroy
+    Gui, %guiName%:+AlwaysOnTop -Caption +ToolWindow +E0x20 +HwndregionHwnd
+    Gui, %guiName%:Color, 4FC3F7
+    regionOptions := "NoActivate x" . state.triggerX . " y" . state.triggerY . " w" . state.triggerWidth . " h" . state.triggerHeight
+    Gui, %guiName%:Show, %regionOptions%
+    g_CamouflageGuiHwnds[hwnd] := regionHwnd
+    WinSet, Transparent, 13, ahk_id %regionHwnd%
+    regionSpec := "0-0 w" . state.triggerWidth . " h" . state.triggerHeight . " R8-8"
+    WinSet, Region, %regionSpec%, ahk_id %regionHwnd%
+}
+
+DestroyCamouflageRegion(hwnd) {
+    global g_CamouflageGuiNames, g_CamouflageGuiHwnds
+    guiName := g_CamouflageGuiNames[hwnd]
+    if (guiName != "")
+        Gui, %guiName%:Destroy
+    g_CamouflageGuiNames.Delete(hwnd)
+    g_CamouflageGuiHwnds.Delete(hwnd)
+}
+
+UpdateCamouflageRegion(hwnd) {
+    global WindowStateByHwnd, g_CamouflageGuiHwnds
+    state := EnsureWindowState(hwnd)
+    regionHwnd := g_CamouflageGuiHwnds[hwnd]
+    if (!regionHwnd)
+        return
+    regionX := state.triggerX, regionY := state.triggerY
+    regionWidth := state.triggerWidth, regionHeight := state.triggerHeight
+    WinMove, ahk_id %regionHwnd%,, %regionX%, %regionY%, %regionWidth%, %regionHeight%
+    regionSpec := "0-0 w" . regionWidth . " h" . regionHeight . " R8-8"
+    WinSet, Region, %regionSpec%, ahk_id %regionHwnd%
+}
+
+IsCamouflageEditKeyDown() {
+    global g_CamouflageEditKey
+    return GetKeyState(g_CamouflageEditKey, "P")
+}
+
+CamouflageRegionMouseDown(hwnd, mouseX, mouseY) {
+    global WindowStateByHwnd
+    state := EnsureWindowState(hwnd)
+    if (!IsCamouflageEditKeyDown())
+        return
+    edge := 8
+    onLeft := mouseX <= state.triggerX + edge
+    onRight := mouseX >= state.triggerX + state.triggerWidth - edge
+    onTop := mouseY <= state.triggerY + edge
+    onBottom := mouseY >= state.triggerY + state.triggerHeight - edge
+    state.dragMode := (onLeft ? "l" : "") . (onRight ? "r" : "") . (onTop ? "t" : "") . (onBottom ? "b" : "")
+    if (state.dragMode = "")
+        state.dragMode := "move"
+    state.dragStartX := mouseX, state.dragStartY := mouseY
+    state.dragStartLeft := state.triggerX, state.dragStartTop := state.triggerY
+    state.dragStartWidth := state.triggerWidth, state.dragStartHeight := state.triggerHeight
+}
+
+EditCamouflageRegions() {
+    global WindowStateByHwnd
+    GetCursorScreenPos(mouseX, mouseY)
+    for hwnd, state in WindowStateByHwnd {
+        if (!state.camouflageEnabled)
+            continue
+        if (!state.dragMode)
+            continue
+        dx := mouseX - state.dragStartX, dy := mouseY - state.dragStartY
+        if (state.dragMode = "move")
+            state.editX := state.triggerX := state.dragStartLeft + dx, state.editY := state.triggerY := state.dragStartTop + dy
+        else {
+            newLeft := state.dragStartLeft
+            newTop := state.dragStartTop
+            newWidth := state.dragStartWidth
+            newHeight := state.dragStartHeight
+            if (InStr(state.dragMode, "l")) {
+                newLeft := state.dragStartLeft + dx
+                newWidth := state.dragStartWidth - dx
+            }
+            if (InStr(state.dragMode, "r"))
+                newWidth := state.dragStartWidth + dx
+            if (InStr(state.dragMode, "t")) {
+                newTop := state.dragStartTop + dy
+                newHeight := state.dragStartHeight - dy
+            }
+            if (InStr(state.dragMode, "b"))
+                newHeight := state.dragStartHeight + dy
+            if (newWidth < 40) {
+                if (InStr(state.dragMode, "l"))
+                    newLeft := state.dragStartLeft + state.dragStartWidth - 40
+                newWidth := 40
+            }
+            if (newHeight < 30) {
+                if (InStr(state.dragMode, "t"))
+                    newTop := state.dragStartTop + state.dragStartHeight - 30
+                newHeight := 30
+            }
+            state.editX := state.triggerX := newLeft
+            state.editY := state.triggerY := newTop
+            state.editWidth := state.triggerWidth := newWidth
+            state.editHeight := state.triggerHeight := newHeight
+        }
+        UpdateCamouflageRegion(hwnd)
+    }
+}
+
+ReleaseCamouflageRegions() {
+    global WindowStateByHwnd
+    for hwnd, state in WindowStateByHwnd
+        state.dragMode := ""
 }
 
 RevealCamouflageWindow(hwnd, activate := false) {
@@ -564,7 +738,7 @@ RevealCamouflageWindow(hwnd, activate := false) {
 }
 
 CheckCamouflageWindows() {
-    global WindowStateByHwnd
+    global WindowStateByHwnd, g_CamouflageGuiHwnds, g_RadialPreviewHwnd
 
     GetCursorScreenPos(mouseX, mouseY)
     for hwnd, state in WindowStateByHwnd {
@@ -573,15 +747,31 @@ CheckCamouflageWindows() {
             continue
         }
         insideTrigger := mouseX >= state.triggerX && mouseX <= state.triggerX + state.triggerWidth && mouseY >= state.triggerY && mouseY <= state.triggerY + state.triggerHeight
+        if (hwnd = g_RadialPreviewHwnd) {
+            state.hideAt := 0
+            continue
+        }
         if (state.camouflageEnabled && !state.camouflageHidden)
             UpdateCamouflageTrigger(hwnd)
+        if (state.camouflageEnabled && IsCamouflageEditKeyDown()) {
+            regionHwnd := g_CamouflageGuiHwnds[hwnd]
+            if (regionHwnd)
+                WinSet, ExStyle, -0x20, ahk_id %regionHwnd%
+            if (!state.dragMode && GetKeyState("LButton", "P") && insideTrigger)
+                CamouflageRegionMouseDown(hwnd, mouseX, mouseY)
+            continue
+        }
+        regionHwnd := g_CamouflageGuiHwnds[hwnd]
+        if (regionHwnd)
+            WinSet, ExStyle, +0x20, ahk_id %regionHwnd%
         if (state.camouflageHidden && insideTrigger) {
             RevealCamouflageWindow(hwnd, true)
             state.hideAt := 0
         } else if (state.camouflageEnabled && !state.camouflageHidden) {
             WinGetPos, wx, wy, ww, wh, ahk_id %hwnd%
             insideWindow := mouseX >= wx - 8 && mouseX <= wx + ww + 8 && mouseY >= wy - 8 && mouseY <= wy + wh + 8
-            if (!insideTrigger && !insideWindow) {
+            insideMenu := IsWindowMenuUnderCursor(hwnd, mouseX, mouseY)
+            if (!insideTrigger && !insideWindow && !insideMenu) {
                 if (!state.hideAt)
                     state.hideAt := A_TickCount + g_CamouflageHideDelay
                 else if (A_TickCount >= state.hideAt) {
@@ -594,10 +784,26 @@ CheckCamouflageWindows() {
             }
         }
     }
+    global g_WindowMenuOpen, g_WindowMenuTargetHwnd
+    if (g_WindowMenuOpen && g_WindowMenuTargetHwnd) {
+        menuTarget := g_WindowMenuTargetHwnd
+        WinGetPos, targetX, targetY, targetW, targetH, ahk_id %menuTarget%
+        overTarget := mouseX >= targetX && mouseX <= targetX + targetW && mouseY >= targetY && mouseY <= targetY + targetH
+        if (!overTarget && !IsWindowMenuUnderCursor(menuTarget, mouseX, mouseY))
+            DestroyWindowMenu()
+    }
+}
+
+IsWindowMenuUnderCursor(hwnd, mouseX, mouseY) {
+    global g_WindowMenuOpen, g_WindowMenuTargetHwnd, g_WindowMenuHwnd
+    if (!g_WindowMenuOpen || g_WindowMenuTargetHwnd != hwnd || !g_WindowMenuHwnd)
+        return false
+    WinGetPos, menuX, menuY, menuWidth, menuHeight, ahk_id %g_WindowMenuHwnd%
+    return mouseX >= menuX && mouseX <= menuX + menuWidth && mouseY >= menuY && mouseY <= menuY + menuHeight
 }
 
 ShowWindowMenu(hwnd) {
-    global g_WindowMenuOpen, UI_WindowOpacity, UI_WindowMenuBind, WindowOpacityValue
+    global g_WindowMenuOpen, g_WindowMenuHwnd, UI_WindowOpacity, UI_WindowMenuBind, WindowOpacityValue
 
     DestroyWindowMenu()
     state := EnsureWindowState(hwnd)
@@ -618,6 +824,7 @@ ShowWindowMenu(hwnd) {
     menuX := Max(workLeft, Min(menuX, workRight - menuWidth))
     menuY := Max(workTop, Min(menuY, workBottom - menuHeight))
     Gui, WindowMenu:+AlwaysOnTop -Caption +ToolWindow +HwndWindowMenuHwnd
+    g_WindowMenuHwnd := WindowMenuHwnd
     Gui, WindowMenu:Color, 202833
     Gui, WindowMenu:Font, s9 cFFFFFF, Microsoft YaHei
     Gui, WindowMenu:Add, Text, x12 y6 w180 Center, 透明度
@@ -636,8 +843,11 @@ ShowWindowMenu(hwnd) {
     topText := state.alwaysOnTop ? "关" : "开"
     Gui, WindowMenu:Add, Button, x421 y29 w36 h28 gWindowMenuTopmost, %topText%
     currentBinding := GetWindowBindingKey(hwnd)
-    Gui, WindowMenu:Add, DropDownList, x476 y31 w94 vUI_WindowMenuBind gWindowMenuBindChanged, 无|1|2|3|4|5|6|7|8|9
+    bindChoices := BuildBindingChoices(hwnd, occupiedKeys)
+    Gui, WindowMenu:Add, DropDownList, x476 y31 w94 vUI_WindowMenuBind gWindowMenuBindChanged, %bindChoices%
     GuiControl, WindowMenu:ChooseString, UI_WindowMenuBind, %currentBinding%
+    if (occupiedKeys != "")
+        Gui, WindowMenu:Add, Text, x476 y59 w94 Center c68707A, 已占用: %occupiedKeys%
     Gui, WindowMenu:Add, Button, x562 y3 w22 h18 gWindowMenuClose, ×
     Gui, WindowMenu:Show, NoActivate x%menuX% y%menuY% w%menuWidth% h%menuHeight%
     WinSet, Transparent, 235, ahk_id %WindowMenuHwnd%
@@ -651,9 +861,10 @@ RefreshWindowMenu() {
 }
 
 DestroyWindowMenu() {
-    global g_WindowMenuOpen
+    global g_WindowMenuOpen, g_WindowMenuHwnd
     Gui, WindowMenu:Destroy
     g_WindowMenuOpen := false
+    g_WindowMenuHwnd := 0
 }
 
 IsScriptGui(hwnd) {
@@ -671,6 +882,7 @@ RadialHandler:
     if (g_RadialOpen)
         return
 
+    CaptureRadialZOrderSnapshot()
     CollectRadialItems()
     if (g_RadialItems.Length() == 0) {
         ShowOSD("当前没有可用的窗口绑定")
@@ -691,16 +903,47 @@ RadialHandler:
     radialPhysicalKey := RegExReplace(A_ThisHotkey, "^[\^\!\+\#\<\>\*\$~]+", "")
     KeyWait, %radialPhysicalKey%
     SetTimer, RadialSelectionTimer, Off
+    if (!g_RadialSelected)
+        UpdateRadialPreview(0)
     DestroyRadialMenu()
     g_RadialOpen := false
 
-    if (g_RadialSelected)
+    if (g_RadialSelected) {
+        CommitRadialPreview()
         ActivateRadialWindow(g_RadialItems[g_RadialSelected].key)
+    }
 return
 
 RadialSelectionTimer:
     UpdateRadialSelection()
 return
+
+CaptureRadialZOrderSnapshot() {
+    global g_RadialZOrderSnapshot
+    g_RadialZOrderSnapshot := []
+    WinGet, winList, List
+    Loop, %winList% {
+        hwnd := winList%A_Index%
+        if (!hwnd || !DllCall("IsWindowVisible", "Ptr", hwnd))
+            continue
+        WinGetClass, className, ahk_id %hwnd%
+        if (className = "AutoHotkeyGUI")
+            continue
+        WinGet, exStyle, ExStyle, ahk_id %hwnd%
+        if (exStyle & 0x8)
+            continue
+        g_RadialZOrderSnapshot.Push(hwnd)
+    }
+}
+
+GetRadialSnapshotIndex(hwnd) {
+    global g_RadialZOrderSnapshot
+    for index, snapshotHwnd in g_RadialZOrderSnapshot {
+        if (snapshotHwnd = hwnd)
+            return index
+    }
+    return 0
+}
 
 CollectRadialItems() {
     global KeyList, WindowBindings, WindowIsOverlaid, g_RadialItems
@@ -722,7 +965,8 @@ CollectRadialItems() {
         title := fullTitle
         if (StrLen(title) > 14)
             title := SubStr(title, 1, 13) . "..."
-        g_RadialItems.Push({key: key, hwnd: hwnd, app: GetAppName(hwnd), title: title, fullTitle: fullTitle})
+        snapshotIndex := GetRadialSnapshotIndex(hwnd)
+        g_RadialItems.Push({key: key, hwnd: hwnd, app: GetAppName(hwnd), title: title, fullTitle: fullTitle, snapshotIndex: snapshotIndex})
     }
 }
 
@@ -738,6 +982,7 @@ ShowRadialMenu() {
     g_RadialSectorHwnds := []
     g_RadialSectorLabelHwnds := []
     g_RadialSectorIconHwnds := []
+    g_RadialLabelGuiNames := []
     diameter := (g_RadialOuterRadius + g_RadialMenuPadding) * 2
     menuX := g_RadialCenterX - Floor(diameter / 2)
     menuY := g_RadialCenterY - Floor(diameter / 2)
@@ -776,6 +1021,13 @@ ShowRadialMenu() {
     Gui, RadialCenter:Show, NoActivate x%centerX% y%centerY% w%g_RadialPreviewWidth% h%g_RadialPreviewHeight%
     WinSet, Region, 0-0 w%g_RadialPreviewWidth% h%g_RadialPreviewHeight% R8-8, ahk_id %g_RadialHwnd%
     WinSet, Transparent, 245, ahk_id %g_RadialHwnd%
+
+    Loop, %itemCount% {
+        sectorIndex := A_Index
+        startAngle := -90 + (sectorIndex - 1) * angleStep + g_RadialGapDegrees / 2
+        sweepAngle := angleStep - g_RadialGapDegrees
+        CreateRadialLabel(sectorIndex, menuX, menuY, diameter, center, startAngle, sweepAngle)
+    }
 }
 
 CreateRadialSector(index, menuX, menuY, diameter, center, startAngle, sweepAngle, color) {
@@ -793,7 +1045,6 @@ CreateRadialSector(index, menuX, menuY, diameter, center, startAngle, sweepAngle
     SetPolygonWindowRegion(sectorHwnd, points)
     g_RadialSectorHwnds.Push(sectorHwnd)
     WinSet, Transparent, 225, ahk_id %sectorHwnd%
-    CreateRadialLabel(index, menuX, menuY, diameter, center, startAngle, sweepAngle)
 }
 
 CreateRadialLabel(index, menuX, menuY, diameter, center, startAngle, sweepAngle) {
@@ -816,7 +1067,7 @@ CreateRadialLabel(index, menuX, menuY, diameter, center, startAngle, sweepAngle)
     Gui, %labelGui%:Destroy
     Gui, %labelGui%:+AlwaysOnTop -Caption +ToolWindow +E0x20 +LastFound
     Gui, %labelGui%:Color, 10151D
-    Gui, %labelGui%:Font, s8 cD8DEE9 w700, Microsoft YaHei
+    Gui, %labelGui%:Font, s8 cFFFFFF w700, Microsoft YaHei
     Gui, %labelGui%:Add, Picture, x4 y%iconY% w%iconSize% h%iconSize% hwndSectorIconHwnd
     iconSpec := "HICON:*" . GetWindowIcon(item.hwnd)
     GuiControl, %labelGui%:, %SectorIconHwnd%, %iconSpec%
@@ -831,7 +1082,8 @@ CreateRadialLabel(index, menuX, menuY, diameter, center, startAngle, sweepAngle)
     Gui, %labelGui%:Add, Text, x%textX% y0 w%textWidth% h%labelHeight% Left +0x200 hwndSectorLabelHwnd, %labelText%
     Gui, %labelGui%:Show, NoActivate x%labelX% y%labelY% w%labelWidth% h%labelHeight%
     labelHwnd := WinExist()
-    WinSet, TransColor, 10151D 0, ahk_id %labelHwnd%
+    WinSet, Transparent, 235, ahk_id %labelHwnd%
+    WinSet, AlwaysOnTop, On, ahk_id %labelHwnd%
     g_RadialSectorIconHwnds.Push(SectorIconHwnd)
     g_RadialSectorLabelHwnds.Push(SectorLabelHwnd)
     g_RadialLabelGuiNames.Push(labelGui)
@@ -900,6 +1152,18 @@ SetCursorScreenPos(x, y) {
     DllCall("SetCursorPos", "Int", x, "Int", y)
 }
 
+KeepRadialMenuOnTop() {
+    global g_RadialHwnd, g_RadialSectorHwnds, g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds
+    if (g_RadialHwnd)
+        DllCall("SetWindowPos", "Ptr", g_RadialHwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x213 | 0x0040)
+    for _, hwnd in g_RadialSectorHwnds
+        DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x213 | 0x0040)
+    for _, hwnd in g_RadialSectorLabelHwnds
+        DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x213 | 0x0040)
+    for _, hwnd in g_RadialSectorIconHwnds
+        DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x213 | 0x0040)
+}
+
 DestroyRadialMenu() {
     global g_RadialItems, g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds, g_RadialLabelGuiNames
     global g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
@@ -944,7 +1208,101 @@ UpdateRadialSelection() {
     if (newSelection != g_RadialSelected) {
         g_RadialSelected := newSelection
         UpdateRadialHighlight()
+        UpdateRadialPreview(newSelection)
     }
+}
+
+UpdateRadialPreview(selection) {
+    global g_RadialItems, g_RadialPreviewKey, g_RadialPreviewHwnd
+    global g_RadialPreviewSnapshotIndex, g_RadialPreviewMinMax, g_RadialPreviewWasMinimized, g_RadialPreviewWasTopmost
+    if (g_RadialPreviewKey && (selection = 0 || g_RadialItems[selection].key != g_RadialPreviewKey))
+        RestoreRadialPreview()
+    if (!selection || g_RadialPreviewKey)
+        return
+
+    item := g_RadialItems[selection]
+    itemHwnd := item.hwnd
+    WinGet, minMax, MinMax, ahk_id %itemHwnd%
+    state := EnsureWindowState(itemHwnd)
+    g_RadialPreviewKey := item.key
+    g_RadialPreviewHwnd := itemHwnd
+    g_RadialPreviewSnapshotIndex := item.snapshotIndex
+    g_RadialPreviewMinMax := minMax
+    g_RadialPreviewWasMinimized := (minMax = -1 || state.camouflageHidden)
+    WinGet, previewExStyle, ExStyle, ahk_id %itemHwnd%
+    g_RadialPreviewWasTopmost := !!(previewExStyle & 0x8)
+
+    if (minMax = -1 || state.camouflageHidden) {
+        WinRestore, ahk_id %itemHwnd%
+        state.camouflageHidden := false
+    }
+    ; 轮盘本身是置顶 GUI，预览必须临时位于其上方，但不激活窗口。
+    DllCall("SetWindowPos", "Ptr", itemHwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x213 | 0x0040)
+    KeepRadialMenuOnTop()
+}
+
+CommitRadialPreview() {
+    global g_RadialPreviewKey, g_RadialPreviewHwnd, g_RadialPreviewSnapshotIndex
+    global g_RadialPreviewMinMax, g_RadialPreviewWasMinimized, g_RadialPreviewWasTopmost
+    g_RadialPreviewKey := 0
+    g_RadialPreviewHwnd := 0
+    g_RadialPreviewSnapshotIndex := 0
+    g_RadialPreviewMinMax := 0
+    g_RadialPreviewWasMinimized := false
+    g_RadialPreviewWasTopmost := false
+}
+
+RestoreRadialSnapshotPosition(snapshotIndex, targetHwnd) {
+    global g_RadialZOrderSnapshot
+    flags := 0x213
+
+    index := snapshotIndex - 1
+    while (index >= 1) {
+        candidate := g_RadialZOrderSnapshot[index]
+        if (candidate != targetHwnd && DllCall("IsWindow", "Ptr", candidate)) {
+            DllCall("SetWindowPos", "Ptr", targetHwnd, "Ptr", candidate, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", flags)
+            return
+        }
+        index--
+    }
+
+    index := snapshotIndex + 1
+    snapshotCount := g_RadialZOrderSnapshot.Length()
+    while (index <= snapshotCount) {
+        candidate := g_RadialZOrderSnapshot[index]
+        if (candidate != targetHwnd && DllCall("IsWindow", "Ptr", candidate)) {
+            currentAbove := DllCall("GetWindow", "Ptr", candidate, "UInt", 3, "Ptr")
+            if (currentAbove = targetHwnd)
+                return
+            DllCall("SetWindowPos", "Ptr", targetHwnd, "Ptr", currentAbove, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", flags)
+            return
+        }
+        index++
+    }
+
+    DllCall("SetWindowPos", "Ptr", targetHwnd, "Ptr", 0, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", flags)
+}
+
+RestoreRadialPreview() {
+    global g_RadialPreviewKey, g_RadialPreviewHwnd, g_RadialPreviewSnapshotIndex
+    global g_RadialPreviewMinMax, g_RadialPreviewWasMinimized, g_RadialPreviewWasTopmost, WindowStateByHwnd
+    hwnd := g_RadialPreviewHwnd
+    if (hwnd && WinExist("ahk_id " . hwnd)) {
+        if (g_RadialPreviewWasMinimized) {
+            if (WindowStateByHwnd.HasKey(hwnd) && WindowStateByHwnd[hwnd].camouflageEnabled)
+                WindowStateByHwnd[hwnd].camouflageHidden := true
+            WinMinimize, ahk_id %hwnd%
+        } else if (!g_RadialPreviewWasTopmost) {
+            DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", -2, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x213 | 0x0040)
+            RestoreRadialSnapshotPosition(g_RadialPreviewSnapshotIndex, hwnd)
+        }
+    }
+    g_RadialPreviewKey := 0
+    g_RadialPreviewHwnd := 0
+    g_RadialPreviewSnapshotIndex := 0
+    g_RadialPreviewMinMax := 0
+    g_RadialPreviewWasMinimized := false
+    g_RadialPreviewWasTopmost := false
 }
 
 UpdateRadialHighlight() {
