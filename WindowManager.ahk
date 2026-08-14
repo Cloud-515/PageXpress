@@ -70,6 +70,7 @@ global g_RadialHwnd := 0
 global g_RadialSectorHwnds := []
 global g_RadialSectorLabelHwnds := []
 global g_RadialSectorIconHwnds := []
+global g_RadialLabelGuiNames := []
 global g_RadialAppControlHwnd := 0
 global g_RadialCenterControlHwnd := 0
 global g_RadialIconControlHwnd := 0
@@ -491,40 +492,54 @@ CreateRadialSector(index, menuX, menuY, diameter, center, startAngle, sweepAngle
     Gui, %guiName%:+AlwaysOnTop -Caption +ToolWindow +LastFound +E0x20
     sectorHwnd := WinExist()
     Gui, %guiName%:Color, %color%
+    Gui, %guiName%:Show, NoActivate x%menuX% y%menuY% w%diameter% h%diameter%
+
+    points := BuildAnnularSectorPoints(center, g_RadialOuterRadius, g_RadialInnerRadius, startAngle, sweepAngle)
+    SetPolygonWindowRegion(sectorHwnd, points)
+    g_RadialSectorHwnds.Push(sectorHwnd)
+    WinSet, Transparent, 225, ahk_id %sectorHwnd%
+    CreateRadialLabel(index, menuX, menuY, diameter, center, startAngle, sweepAngle)
+}
+
+CreateRadialLabel(index, menuX, menuY, diameter, center, startAngle, sweepAngle) {
+    global g_RadialItems, g_RadialOuterRadius, g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds, g_RadialLabelGuiNames
+
     item := g_RadialItems[index]
     itemCount := g_RadialItems.Length()
-    labelRadius := g_RadialInnerRadius + (g_RadialOuterRadius - g_RadialInnerRadius) * 0.55
+    labelGui := "RadialLabel" . index
+    labelWidth := itemCount <= 4 ? 170 : (itemCount <= 8 ? 130 : 70)
+    labelHeight := itemCount <= 4 ? 42 : 24
+    labelRadius := g_RadialOuterRadius + 42
     labelAngle := (startAngle + sweepAngle / 2) * 0.017453292519943
-    labelCenterX := Round(center + Cos(labelAngle) * labelRadius)
-    labelCenterY := Round(center + Sin(labelAngle) * labelRadius)
-    labelWidth := Min(150, Max(58, Round(sweepAngle * 1.65)))
-    labelHeight := itemCount <= 4 ? 52 : (itemCount <= 8 ? 30 : 22)
+    labelCenterX := Round(menuX + center + Cos(labelAngle) * labelRadius)
+    labelCenterY := Round(menuY + center + Sin(labelAngle) * labelRadius)
     labelX := Round(labelCenterX - labelWidth / 2)
     labelY := Round(labelCenterY - labelHeight / 2)
     iconSize := itemCount <= 4 ? 20 : 16
-    iconX := Round(labelCenterX - labelWidth / 2)
-    iconY := Round(labelCenterY - iconSize / 2)
-    Gui, %guiName%:Add, Picture, x%iconX% y%iconY% w%iconSize% h%iconSize% hwndSectorIconHwnd
+    iconY := Floor((labelHeight - iconSize) / 2)
+
+    Gui, %labelGui%:Destroy
+    Gui, %labelGui%:+AlwaysOnTop -Caption +ToolWindow +E0x20 +LastFound
+    Gui, %labelGui%:Color, 10151D
+    Gui, %labelGui%:Font, s8 cD8DEE9 w700, Microsoft YaHei
+    Gui, %labelGui%:Add, Picture, x4 y%iconY% w%iconSize% h%iconSize% hwndSectorIconHwnd
     iconSpec := "HICON:*" . GetWindowIcon(item.hwnd)
-    GuiControl, %guiName%:, %SectorIconHwnd%, %iconSpec%
-    Gui, %guiName%:Font, s8 cD8DEE9 w700, Microsoft YaHei
+    GuiControl, %labelGui%:, %SectorIconHwnd%, %iconSpec%
+    textX := iconSize + 8
+    textWidth := labelWidth - textX - 4
     if (itemCount <= 4)
         labelText := "[" . item.key . "] " . item.app . "`n" . item.title
     else if (itemCount <= 8)
         labelText := "[" . item.key . "] " . item.app
     else
         labelText := "[" . item.key . "]"
-    textX := iconX + iconSize + 3
-    textWidth := labelWidth - iconSize - 3
-    Gui, %guiName%:Add, Text, x%textX% y%labelY% w%textWidth% h%labelHeight% Left +0x200 hwndSectorLabelHwnd, %labelText%
-    Gui, %guiName%:Show, NoActivate x%menuX% y%menuY% w%diameter% h%diameter%
+    Gui, %labelGui%:Add, Text, x%textX% y0 w%textWidth% h%labelHeight% Left +0x200 hwndSectorLabelHwnd, %labelText%
+    Gui, %labelGui%:Show, NoActivate x%labelX% y%labelY% w%labelWidth% h%labelHeight%
+    labelHwnd := WinExist()
+    WinSet, TransColor, 10151D 0, ahk_id %labelHwnd%
     g_RadialSectorIconHwnds.Push(SectorIconHwnd)
     g_RadialSectorLabelHwnds.Push(SectorLabelHwnd)
-
-    points := BuildAnnularSectorPoints(center, g_RadialOuterRadius, g_RadialInnerRadius, startAngle, sweepAngle)
-    SetPolygonWindowRegion(sectorHwnd, points)
-    g_RadialSectorHwnds.Push(sectorHwnd)
-    WinSet, Transparent, 225, ahk_id %sectorHwnd%
+    g_RadialLabelGuiNames.Push(labelGui)
 }
 
 BuildAnnularSectorPoints(center, outerRadius, innerRadius, startAngle, sweepAngle) {
@@ -591,17 +606,19 @@ SetCursorScreenPos(x, y) {
 }
 
 DestroyRadialMenu() {
-    global g_RadialItems, g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds
+    global g_RadialItems, g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds, g_RadialLabelGuiNames
     global g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
-    global g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds
 
     Loop, % g_RadialItems.Length() {
         guiName := "RadialSector" . A_Index
         Gui, %guiName%:Destroy
+        labelGui := "RadialLabel" . A_Index
+        Gui, %labelGui%:Destroy
     }
     Gui, RadialCenter:Destroy
     g_RadialSectorLabelHwnds := []
     g_RadialSectorIconHwnds := []
+    g_RadialLabelGuiNames := []
     g_RadialAppControlHwnd := 0
     g_RadialCenterControlHwnd := 0
     g_RadialIconControlHwnd := 0
@@ -637,6 +654,7 @@ UpdateRadialSelection() {
 
 UpdateRadialHighlight() {
     global g_RadialItems, g_RadialSelected, g_RadialSectorHwnds
+    global g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds, g_RadialLabelGuiNames
     global g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
     global g_RadialNormalColor, g_RadialSelectedColor
 
@@ -647,14 +665,15 @@ UpdateRadialHighlight() {
         sectorHwnd := g_RadialSectorHwnds[A_Index]
         opacity := (A_Index == g_RadialSelected) ? 250 : 225
         WinSet, Transparent, %opacity%, ahk_id %sectorHwnd%
+        labelGui := g_RadialLabelGuiNames[A_Index]
         labelHwnd := g_RadialSectorLabelHwnds[A_Index]
         iconHwnd := g_RadialSectorIconHwnds[A_Index]
         if (A_Index == g_RadialSelected) {
-            GuiControl, %guiName%: +cFFFFFF, %labelHwnd%
-            GuiControl, %guiName%: +cFFFFFF, %iconHwnd%
+            GuiControl, %labelGui%: +cFFFFFF, %labelHwnd%
+            GuiControl, %labelGui%: +cFFFFFF, %iconHwnd%
         } else {
-            GuiControl, %guiName%: +cD8DEE9, %labelHwnd%
-            GuiControl, %guiName%: +cD8DEE9, %iconHwnd%
+            GuiControl, %labelGui%: +cD8DEE9, %labelHwnd%
+            GuiControl, %labelGui%: +cD8DEE9, %iconHwnd%
         }
     }
 
