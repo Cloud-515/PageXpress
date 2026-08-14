@@ -18,7 +18,10 @@ IniRead, UnbindModifier, %IniFile%, Hotkeys, UnbindModifier, ^+
 IniRead, PinHotkey, %IniFile%, Hotkeys, PinHotkey, !T
 IniRead, SnapshotHotkey, %IniFile%, Hotkeys, SnapshotHotkey, !0
 IniRead, PreviewHotkey, %IniFile%, Hotkeys, PreviewHotkey, !vkC0
-IniRead, RadialHotkey, %IniFile%, Hotkeys, RadialHotkey, !Space
+IniRead, RadialHotkey, %IniFile%, Hotkeys, RadialHotkey, !NumpadAdd
+IniRead, RadialOffsetX, %IniFile%, RadialMenu, OffsetX, 0
+IniRead, RadialOffsetY, %IniFile%, RadialMenu, OffsetY, 0
+IniRead, RadialSize, %IniFile%, RadialMenu, Size, 220
 IniRead, ConfigHotkey, %IniFile%, Hotkeys, ConfigHotkey, ^!vkC0
 
 ; 提取按键的物理键，供 KeyWait 使用 (剔除修饰符)
@@ -35,16 +38,22 @@ global g_TriggerModifier := TriggerModifier
 global g_BindModifier := BindModifier
 global g_UnbindModifier := UnbindModifier
 global g_RadialOpen := false
+global g_RadialOriginX := 0
+global g_RadialOriginY := 0
 global g_RadialCenterX := 0
 global g_RadialCenterY := 0
 global g_RadialVirtualX := 0
 global g_RadialVirtualY := 0
+global g_RadialLastMouseX := 0
+global g_RadialLastMouseY := 0
 global g_RadialSelected := 0
 global g_RadialItems := []
-global g_RadialOuterRadius := 220
-global g_RadialInnerRadius := 142
-global g_RadialPreviewWidth := 260
-global g_RadialPreviewHeight := 88
+global g_RadialOffsetX := RadialOffsetX + 0
+global g_RadialOffsetY := RadialOffsetY + 0
+global g_RadialOuterRadius := Max(120, RadialSize + 0)
+global g_RadialInnerRadius := Round(g_RadialOuterRadius * 0.645)
+global g_RadialPreviewWidth := Round(g_RadialOuterRadius * 1.18)
+global g_RadialPreviewHeight := Round(g_RadialOuterRadius * 0.4)
 global g_RadialGapDegrees := 2
 global g_RadialMenuPadding := 8
 global g_RadialDeadZone := g_RadialInnerRadius
@@ -93,7 +102,7 @@ ShowConfigGUI:
     Gui, Config:Add, Text, x30 y110, 解绑窗口修饰键:
     Gui, Config:Add, DropDownList, x150 y105 w170 vUI_Unbind, % BuildDDL(g_UnbindModifier)
 
-    Gui, Config:Add, GroupBox, x15 y155 w330 h235, 2. 独立功能快捷键 (AHK语法)
+    Gui, Config:Add, GroupBox, x15 y155 w330 h345, 2. 独立功能快捷键与轮盘外观
     Gui, Config:Add, Text, x30 y180 w300 cGray, 语法：! = Alt，^ = Ctrl，+ = Shift`n特殊：vkC0 = · 键 (Esc下方波浪号)
 
     Gui, Config:Add, Text, x30 y225, 全局置顶按键:
@@ -107,13 +116,26 @@ ShowConfigGUI:
 
     Gui, Config:Add, Text, x30 y315, 鼠标轮盘按键:
     Gui, Config:Add, Edit, x150 y310 w170 vUI_Radial, %RadialHotkey%
+    Gui, Config:Add, Text, x30 y335 w290 cGray, 示例：!NumpadAdd 为 Alt+小键盘加号；!NumpadSub 为 Alt+小键盘减号
 
-    Gui, Config:Add, Text, x30 y345, 弹出本配置页:
-    Gui, Config:Add, Edit, x150 y340 w170 vUI_Config, %ConfigHotkey%
+    Gui, Config:Add, Text, x30 y365, 轮盘水平偏移:
+    Gui, Config:Add, Edit, x150 y360 w70 Number vUI_RadialOffsetX, %RadialOffsetX%
+    Gui, Config:Add, Text, x230 y365, 像素
 
-    Gui, Config:Add, Button, x25 y405 w90 h35 gSaveConfig, 保存并重启
-    Gui, Config:Add, Button, x135 y405 w90 h35 gCloseConfig, 取消
-    Gui, Config:Add, Button, x245 y405 w90 h35 gResetConfig, 恢复默认
+    Gui, Config:Add, Text, x30 y395, 轮盘垂直偏移:
+    Gui, Config:Add, Edit, x150 y390 w70 Number vUI_RadialOffsetY, %RadialOffsetY%
+    Gui, Config:Add, Text, x230 y395, 像素
+
+    Gui, Config:Add, Text, x30 y425, 轮盘外半径:
+    Gui, Config:Add, Edit, x150 y420 w70 Number vUI_RadialSize, %RadialSize%
+    Gui, Config:Add, Text, x230 y425, 像素
+
+    Gui, Config:Add, Text, x30 y455, 弹出本配置页:
+    Gui, Config:Add, Edit, x150 y450 w170 vUI_Config, %ConfigHotkey%
+
+    Gui, Config:Add, Button, x25 y515 w90 h35 gSaveConfig, 保存并重启
+    Gui, Config:Add, Button, x135 y515 w90 h35 gCloseConfig, 取消
+    Gui, Config:Add, Button, x245 y515 w90 h35 gResetConfig, 恢复默认
 
     Gui, Config:Show, , ⚙️ 快捷键配置中心
 return
@@ -133,6 +155,9 @@ SaveConfig:
     IniWrite, %UI_Preview%, %IniFile%, Hotkeys, PreviewHotkey
     IniWrite, %UI_Radial%, %IniFile%, Hotkeys, RadialHotkey
     IniWrite, %UI_Config%, %IniFile%, Hotkeys, ConfigHotkey
+    IniWrite, %UI_RadialOffsetX%, %IniFile%, RadialMenu, OffsetX
+    IniWrite, %UI_RadialOffsetY%, %IniFile%, RadialMenu, OffsetY
+    IniWrite, %UI_RadialSize%, %IniFile%, RadialMenu, Size
     
     ShowOSD("✅ 配置已保存，正在生效...")
     Sleep, 1000
@@ -319,16 +344,19 @@ RadialHandler:
         return
     }
 
-    GetCursorScreenPos(g_RadialCenterX, g_RadialCenterY)
-    g_RadialVirtualX := 0
-    g_RadialVirtualY := 0
+    GetCursorScreenPos(g_RadialOriginX, g_RadialOriginY)
+    g_RadialCenterX := g_RadialOriginX + g_RadialOffsetX
+    g_RadialCenterY := g_RadialOriginY + g_RadialOffsetY
+    g_RadialVirtualX := g_RadialCenterX
+    g_RadialVirtualY := g_RadialCenterY
+    g_RadialLastMouseX := g_RadialOriginX
+    g_RadialLastMouseY := g_RadialOriginY
     g_RadialSelected := 0
     g_RadialOpen := true
     ShowRadialMenu()
     SetTimer, RadialSelectionTimer, 16
     KeyWait, %RadialPhysicalKey%
     SetTimer, RadialSelectionTimer, Off
-    SetCursorScreenPos(g_RadialCenterX, g_RadialCenterY)
     DestroyRadialMenu()
     g_RadialOpen := false
 
@@ -396,7 +424,6 @@ ShowRadialMenu() {
     Gui, RadialCenter:Show, NoActivate x%centerX% y%centerY% w%g_RadialPreviewWidth% h%g_RadialPreviewHeight%
     WinSet, Region, 0-0 w%g_RadialPreviewWidth% h%g_RadialPreviewHeight% R8-8, ahk_id %g_RadialHwnd%
     WinSet, Transparent, 245, ahk_id %g_RadialHwnd%
-    CalibrateRadialLayers(menuX, menuY, diameter)
 }
 
 CreateRadialSector(index, menuX, menuY, diameter, center, startAngle, sweepAngle, color) {
@@ -490,26 +517,32 @@ DestroyRadialMenu() {
 }
 
 UpdateRadialSelection() {
-    global g_RadialCenterX, g_RadialCenterY, g_RadialVirtualX, g_RadialVirtualY
-    global g_RadialInnerRadius, g_RadialOuterRadius, g_RadialItems, g_RadialSelected
+    global g_RadialLastMouseX, g_RadialLastMouseY, g_RadialVirtualX, g_RadialVirtualY
+    global g_RadialCenterX, g_RadialCenterY, g_RadialInnerRadius, g_RadialOuterRadius
+    global g_RadialItems, g_RadialSelected
 
     GetCursorScreenPos(mouseX, mouseY)
-    g_RadialVirtualX += mouseX - g_RadialCenterX
-    g_RadialVirtualY += mouseY - g_RadialCenterY
-    SetCursorScreenPos(g_RadialCenterX, g_RadialCenterY)
+    g_RadialVirtualX += mouseX - g_RadialLastMouseX
+    g_RadialVirtualY += mouseY - g_RadialLastMouseY
+    g_RadialLastMouseX := mouseX
+    g_RadialLastMouseY := mouseY
 
-    distance := Sqrt(g_RadialVirtualX * g_RadialVirtualX + g_RadialVirtualY * g_RadialVirtualY)
+    relativeX := g_RadialVirtualX - g_RadialCenterX
+    relativeY := g_RadialVirtualY - g_RadialCenterY
+    distance := Sqrt(relativeX * relativeX + relativeY * relativeY)
     maxDistance := g_RadialOuterRadius - 4
     if (distance > maxDistance) {
         scale := maxDistance / distance
-        g_RadialVirtualX *= scale
-        g_RadialVirtualY *= scale
+        relativeX *= scale
+        relativeY *= scale
+        g_RadialVirtualX := g_RadialCenterX + relativeX
+        g_RadialVirtualY := g_RadialCenterY + relativeY
         distance := maxDistance
     }
 
     newSelection := 0
     if (distance >= g_RadialInnerRadius) {
-        angle := DllCall("msvcrt\atan2", "Double", g_RadialVirtualY, "Double", g_RadialVirtualX, "CDecl Double") * 57.295779513082
+        angle := DllCall("msvcrt\atan2", "Double", relativeY, "Double", relativeX, "CDecl Double") * 57.295779513082
         if (angle < 0)
             angle += 360
         angle := Mod(angle + 90, 360)
