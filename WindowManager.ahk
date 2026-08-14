@@ -58,7 +58,6 @@ global g_RadialInnerRadius := Round(g_RadialOuterRadius * 0.645)
 global g_RadialPreviewWidth := Round(g_RadialOuterRadius * 1.18)
 global g_RadialPreviewHeight := Round(g_RadialOuterRadius * 0.4)
 global g_RadialGapDegrees := 2
-global g_RadialSelectionHysteresis := 6
 global g_RadialMenuPadding := 8
 global g_RadialDeadZone := g_RadialInnerRadius
 global g_RadialHwnd := 0
@@ -530,8 +529,8 @@ DestroyRadialMenu() {
 }
 
 UpdateRadialSelection() {
-    global g_RadialCenterX, g_RadialCenterY, g_RadialInnerRadius
-    global g_RadialItems, g_RadialSelected, g_RadialSelectionHysteresis
+    global g_RadialCenterX, g_RadialCenterY, g_RadialInnerRadius, g_RadialOuterRadius
+    global g_RadialGapDegrees, g_RadialItems, g_RadialSelected
 
     GetCursorScreenPos(mouseX, mouseY)
     relativeX := mouseX - g_RadialCenterX
@@ -539,22 +538,16 @@ UpdateRadialSelection() {
     distance := Sqrt(relativeX * relativeX + relativeY * relativeY)
     newSelection := 0
 
-    if (distance >= g_RadialInnerRadius) {
+    if (distance >= g_RadialInnerRadius && distance <= g_RadialOuterRadius) {
         angle := DllCall("msvcrt\atan2", "Double", relativeY, "Double", relativeX, "CDecl Double") * 57.295779513082
-        if (angle < 0)
-            angle += 360
-        angle := Mod(angle + 90, 360)
+        angle := Mod(angle + 90 + 360, 360)
         angleStep := 360 / g_RadialItems.Length()
-        newSelection := Floor((angle + angleStep / 2) / angleStep) + 1
-        if (newSelection > g_RadialItems.Length())
-            newSelection := 1
+        sectorIndex := Floor(angle / angleStep) + 1
+        sectorStart := (sectorIndex - 1) * angleStep
+        localAngle := angle - sectorStart
 
-        if (g_RadialSelected && newSelection != g_RadialSelected) {
-            selectedCenter := (g_RadialSelected - 1) * angleStep
-            angularDistance := Abs(Mod(angle - selectedCenter + 540, 360) - 180)
-            if (angularDistance < angleStep / 2 + g_RadialSelectionHysteresis)
-                newSelection := g_RadialSelected
-        }
+        if (localAngle >= g_RadialGapDegrees / 2 && localAngle <= angleStep - g_RadialGapDegrees / 2)
+            newSelection := sectorIndex
     }
 
     if (newSelection != g_RadialSelected) {
