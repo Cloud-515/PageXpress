@@ -1153,15 +1153,18 @@ SetCursorScreenPos(x, y) {
 }
 
 KeepRadialMenuOnTop() {
-    global g_RadialHwnd, g_RadialSectorHwnds, g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds
+    global g_RadialHwnd, g_RadialSectorHwnds, g_RadialLabelGuiNames
+    flags := 0x213 | 0x0040
     if (g_RadialHwnd)
-        DllCall("SetWindowPos", "Ptr", g_RadialHwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x213 | 0x0040)
+        DllCall("SetWindowPos", "Ptr", g_RadialHwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", flags)
     for _, hwnd in g_RadialSectorHwnds
-        DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x213 | 0x0040)
-    for _, hwnd in g_RadialSectorLabelHwnds
-        DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x213 | 0x0040)
-    for _, hwnd in g_RadialSectorIconHwnds
-        DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x213 | 0x0040)
+        DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", flags)
+    for _, guiName in g_RadialLabelGuiNames {
+        Gui, %guiName%:+LastFound
+        labelGuiHwnd := WinExist()
+        if (labelGuiHwnd)
+            DllCall("SetWindowPos", "Ptr", labelGuiHwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", flags)
+    }
 }
 
 DestroyRadialMenu() {
