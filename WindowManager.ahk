@@ -23,6 +23,7 @@ IniRead, RadialOffsetX, %IniFile%, RadialMenu, OffsetX, 0
 IniRead, RadialOffsetY, %IniFile%, RadialMenu, OffsetY, 0
 IniRead, RadialSize, %IniFile%, RadialMenu, Size, 220
 IniRead, ConfigHotkey, %IniFile%, Hotkeys, ConfigHotkey, ^!vkC0
+RadialHotkey := NormalizeRadialHotkey(RadialHotkey)
 
 ; 提取按键的物理键，供 KeyWait 使用 (剔除修饰符)
 global PreviewPhysicalKey := RegExReplace(PreviewHotkey, "^[\^\!\+\#\<\>\*\$~]+", "")
@@ -142,6 +143,7 @@ return
 
 SaveConfig:
     Gui, Config:Submit
+    UI_Radial := NormalizeRadialHotkey(UI_Radial)
     ; 提取下拉菜单中真实的符号 (例如把 "! (Alt)" 变回 "!")
     RegExMatch(UI_Trigger, "^[^\s]+", newTrigger)
     RegExMatch(UI_Bind, "^[^\s]+", newBind)
@@ -770,6 +772,23 @@ GetDisplayName(KeyName) {
     else if (prefix == "^+")
         prefix := "Ctrl+Shift+"
     return prefix . KeyName
+}
+
+NormalizeRadialHotkey(hotkey) {
+    hotkey := Trim(hotkey)
+    hotkey := StrReplace(hotkey, "Alt+", "!")
+    hotkey := StrReplace(hotkey, "Ctrl+", "^")
+    hotkey := StrReplace(hotkey, "Shift+", "+")
+    hotkey := StrReplace(hotkey, "Numpad=", "NumpadAdd")
+    hotkey := StrReplace(hotkey, "Numpad-", "NumpadSub")
+
+    if (hotkey = "!+" || hotkey = "!=" || hotkey = "Numpad=")
+        return "!NumpadAdd"
+    if (hotkey = "!-" || hotkey = "Numpad-")
+        return "!NumpadSub"
+    if (hotkey = "")
+        return "!NumpadAdd"
+    return hotkey
 }
 
 ; 把底层特殊键格式化成能看懂的人话
