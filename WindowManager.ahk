@@ -425,6 +425,25 @@ WindowMenuTopmost:
     SetWindowTopmost(g_WindowMenuTargetHwnd, !state.alwaysOnTop)
     RefreshWindowMenu()
 return
+WindowMenuBindSpin:
+    Gui, WindowMenu:Submit, NoHide
+    g_WindowMenuBindDigit := UI_WindowMenuBindDigit
+return
+WindowMenuBind:
+    bindKey := g_WindowMenuBindDigit
+    if (bindKey < "1" || bindKey > "9" || StrLen(bindKey) != 1) {
+        ShowOSD("绑定键必须是 1-9")
+        return
+    }
+    for index, existingKey in KeyList {
+        if (WindowBindings[existingKey] = g_WindowMenuTargetHwnd)
+            WindowBindings[existingKey] := ""
+    }
+    WindowBindings[bindKey] := g_WindowMenuTargetHwnd
+    WindowIsOverlaid[bindKey] := false
+    ShowOSD("当前窗口已绑定到: [" . GetDisplayName(bindKey) . "]")
+    RefreshWindowMenu()
+return
 WindowMenuClose:
     DestroyWindowMenu()
 return
@@ -563,7 +582,18 @@ ShowWindowMenu(hwnd) {
     menuWidth := 560, menuHeight := 112
     opacityPercent := Round(state.opacity / 2.55)
     menuX := x + Round((width - menuWidth) / 2)
-    menuY := y + height + 8
+    menuY := y - menuHeight - 8
+
+    SysGet, targetMonitor, Monitor, ahk_id %hwnd%
+    SysGet, workArea, MonitorWorkArea, %targetMonitor%
+    workLeft := workAreaLeft
+    workTop := workAreaTop
+    workRight := workAreaRight
+    workBottom := workAreaBottom
+    if (menuY < workTop)
+        menuY := y + height + 8
+    menuX := Max(workLeft, Min(menuX, workRight - menuWidth))
+    menuY := Max(workTop, Min(menuY, workBottom - menuHeight))
     Gui, WindowMenu:+AlwaysOnTop -Caption +ToolWindow +HwndWindowMenuHwnd
     Gui, WindowMenu:Color, 202833
     Gui, WindowMenu:Font, s9 cFFFFFF, Microsoft YaHei
@@ -573,14 +603,17 @@ ShowWindowMenu(hwnd) {
     Gui, WindowMenu:Add, Text, x445 y8 w100 Center, 置顶
     Gui, WindowMenu:Add, Slider, x16 y35 w140 h28 Range5-100 ToolTip vUI_WindowOpacity gWindowMenuOpacityChanged, %opacityPercent%
     Gui, WindowMenu:Add, Text, x160 y38 w32 vWindowOpacityValue, % opacityPercent . "%"
-    camoText := state.camouflageEnabled ? "关闭" : "开启"
-    Gui, WindowMenu:Add, Button, x205 y35 w110 h28 gWindowMenuCamouflage, %camoText%
+    camoText := state.camouflageEnabled ? "关" : "开"
+    Gui, WindowMenu:Add, Button, x205 y35 w36 h28 gWindowMenuCamouflage, %camoText%
     Gui, WindowMenu:Add, Button, x325 y35 w32 h28 gWindowMenuTriggerSmall, S
     Gui, WindowMenu:Add, Button, x361 y35 w32 h28 gWindowMenuTriggerMedium, M
     Gui, WindowMenu:Add, Button, x397 y35 w32 h28 gWindowMenuTriggerLarge, L
-    topText := state.alwaysOnTop ? "取消置顶" : "置顶"
-    Gui, WindowMenu:Add, Button, x445 y35 w100 h28 gWindowMenuTopmost, %topText%
+    topText := state.alwaysOnTop ? "关" : "开"
+    Gui, WindowMenu:Add, Button, x445 y35 w36 h28 gWindowMenuTopmost, %topText%
     Gui, WindowMenu:Add, Text, x325 y70 w110 Center cAAB7C4, % state.triggerWidth . " × " . state.triggerHeight
+    Gui, WindowMenu:Add, Text, x12 y82 w60, 绑定:
+    Gui, WindowMenu:Add, Edit, x55 y78 w28 h22 Number Limit1 vUI_WindowMenuBindDigit, %g_WindowMenuBindDigit%
+    Gui, WindowMenu:Add, UpDown, Range1-9 gWindowMenuBindSpin, %g_WindowMenuBindDigit%
     Gui, WindowMenu:Add, Button, x528 y5 w22 h20 gWindowMenuClose, ×
     Gui, WindowMenu:Show, NoActivate x%menuX% y%menuY% w%menuWidth% h%menuHeight%
     WinSet, Transparent, 235, ahk_id %WindowMenuHwnd%
