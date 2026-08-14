@@ -68,6 +68,7 @@ global g_RadialMenuPadding := 8
 global g_RadialDeadZone := g_RadialInnerRadius
 global g_RadialHwnd := 0
 global g_RadialSectorHwnds := []
+global g_RadialAppControlHwnd := 0
 global g_RadialCenterControlHwnd := 0
 global g_RadialIconControlHwnd := 0
 global g_RadialIgnoreCursorDelta := false
@@ -430,8 +431,9 @@ CollectRadialItems() {
 ShowRadialMenu() {
     global g_RadialItems, g_RadialCenterX, g_RadialCenterY, g_RadialOuterRadius
     global g_RadialInnerRadius, g_RadialPreviewWidth, g_RadialPreviewHeight, g_RadialGapDegrees, g_RadialMenuPadding
-    global g_RadialNormalColor, g_RadialHwnd, g_RadialSectorHwnds, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
-    global RadialCenterControlHwnd, RadialIconControlHwnd
+    global g_RadialNormalColor, g_RadialHwnd, g_RadialSectorHwnds
+    global g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
+    global RadialAppControlHwnd, RadialCenterControlHwnd, RadialIconControlHwnd
 
     DestroyRadialMenu()
     g_RadialSectorHwnds := []
@@ -454,15 +456,20 @@ ShowRadialMenu() {
     Gui, RadialCenter:Destroy
     Gui, RadialCenter:+AlwaysOnTop -Caption +ToolWindow +LastFound +E0x20
     g_RadialHwnd := WinExist()
-    iconY := Floor((g_RadialPreviewHeight - 32) / 2)
-    textX := 42
-    textWidth := g_RadialPreviewWidth - textX - 5
-    textHeight := g_RadialPreviewHeight - 10
+    iconY := 8
+    appTextX := 34
+    appTextWidth := g_RadialPreviewWidth - appTextX - 5
+    titleY := 39
+    titleHeight := g_RadialPreviewHeight - titleY - 5
+    titleWidth := g_RadialPreviewWidth - 10
     Gui, RadialCenter:Color, %g_RadialCenterColor%
-    Gui, RadialCenter:Add, Picture, x5 y%iconY% w32 h32 hwndRadialIconControlHwnd
+    Gui, RadialCenter:Add, Picture, x5 y%iconY% w24 h24 hwndRadialIconControlHwnd
     Gui, RadialCenter:Font, s10 cFFFFFF w700, Microsoft YaHei
-    Gui, RadialCenter:Add, Text, x%textX% y5 w%textWidth% h%textHeight% Left hwndRadialCenterControlHwnd, 移动鼠标选择窗口
+    Gui, RadialCenter:Add, Text, x%appTextX% y5 w%appTextWidth% h30 Left +0x200 hwndRadialAppControlHwnd, 移动鼠标选择窗口
+    Gui, RadialCenter:Font, s9 cD8DEE9, Microsoft YaHei
+    Gui, RadialCenter:Add, Text, x5 y%titleY% w%titleWidth% h%titleHeight% Left hwndRadialCenterControlHwnd,
     g_RadialIconControlHwnd := RadialIconControlHwnd
+    g_RadialAppControlHwnd := RadialAppControlHwnd
     g_RadialCenterControlHwnd := RadialCenterControlHwnd
     GuiControl, RadialCenter:Hide, %g_RadialIconControlHwnd%
     Gui, RadialCenter:Show, NoActivate x%centerX% y%centerY% w%g_RadialPreviewWidth% h%g_RadialPreviewHeight%
@@ -550,13 +557,14 @@ SetCursorScreenPos(x, y) {
 }
 
 DestroyRadialMenu() {
-    global g_RadialItems, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
+    global g_RadialItems, g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
 
     Loop, % g_RadialItems.Length() {
         guiName := "RadialSector" . A_Index
         Gui, %guiName%:Destroy
     }
     Gui, RadialCenter:Destroy
+    g_RadialAppControlHwnd := 0
     g_RadialCenterControlHwnd := 0
     g_RadialIconControlHwnd := 0
 }
@@ -591,7 +599,7 @@ UpdateRadialSelection() {
 
 UpdateRadialHighlight() {
     global g_RadialItems, g_RadialSelected, g_RadialSectorHwnds
-    global g_RadialCenterControlHwnd, g_RadialIconControlHwnd
+    global g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
     global g_RadialNormalColor, g_RadialSelectedColor
 
     Loop, % g_RadialItems.Length() {
@@ -608,10 +616,12 @@ UpdateRadialHighlight() {
         iconSpec := "HICON:*" . GetWindowIcon(item.hwnd)
         GuiControl, RadialCenter:, %g_RadialIconControlHwnd%, %iconSpec%
         GuiControl, RadialCenter:Show, %g_RadialIconControlHwnd%
+        GuiControl, RadialCenter:, %g_RadialAppControlHwnd%, % item.app
         GuiControl, RadialCenter:, %g_RadialCenterControlHwnd%, % item.fullTitle
     } else {
         GuiControl, RadialCenter:Hide, %g_RadialIconControlHwnd%
-        GuiControl, RadialCenter:, %g_RadialCenterControlHwnd%, 移动鼠标选择窗口
+        GuiControl, RadialCenter:, %g_RadialAppControlHwnd%, 移动鼠标选择窗口
+        GuiControl, RadialCenter:, %g_RadialCenterControlHwnd%,
     }
 }
 
