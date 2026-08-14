@@ -18,12 +18,14 @@ IniRead, UnbindModifier, %IniFile%, Hotkeys, UnbindModifier, ^+
 IniRead, PinHotkey, %IniFile%, Hotkeys, PinHotkey, !T
 IniRead, SnapshotHotkey, %IniFile%, Hotkeys, SnapshotHotkey, !0
 IniRead, PreviewHotkey, %IniFile%, Hotkeys, PreviewHotkey, !vkC0
-IniRead, RadialHotkey, %IniFile%, Hotkeys, RadialHotkey, !NumpadAdd
+IniRead, RadialHotkey, %IniFile%, Hotkeys, RadialHotkey, !=
+IniRead, RadialHotkeyAlt, %IniFile%, Hotkeys, RadialHotkeyAlt, !-
 IniRead, RadialOffsetX, %IniFile%, RadialMenu, OffsetX, 0
 IniRead, RadialOffsetY, %IniFile%, RadialMenu, OffsetY, 0
 IniRead, RadialSize, %IniFile%, RadialMenu, Size, 220
 IniRead, ConfigHotkey, %IniFile%, Hotkeys, ConfigHotkey, ^!vkC0
 RadialHotkey := NormalizeRadialHotkey(RadialHotkey)
+RadialHotkeyAlt := NormalizeRadialHotkey(RadialHotkeyAlt)
 
 ; 提取按键的物理键，供 KeyWait 使用 (剔除修饰符)
 global PreviewPhysicalKey := RegExReplace(PreviewHotkey, "^[\^\!\+\#\<\>\*\$~]+", "")
@@ -75,6 +77,8 @@ for index, key in KeyList {
 Hotkey, $*%SnapshotHotkey%, SnapshotHandler
 Hotkey, $*%PreviewHotkey%, PreviewHandler
 Hotkey, $*%RadialHotkey%, RadialHandler
+if (RadialHotkeyAlt != RadialHotkey)
+    Hotkey, $*%RadialHotkeyAlt%, RadialHandler
 Hotkey, $*%PinHotkey%, PinHandler
 Hotkey, %ConfigHotkey%, ShowConfigGUI
 
@@ -103,7 +107,7 @@ ShowConfigGUI:
     Gui, Config:Add, Text, x30 y110, 解绑窗口修饰键:
     Gui, Config:Add, DropDownList, x150 y105 w170 vUI_Unbind, % BuildDDL(g_UnbindModifier)
 
-    Gui, Config:Add, GroupBox, x15 y155 w330 h345, 2. 独立功能快捷键与轮盘外观
+    Gui, Config:Add, GroupBox, x15 y155 w330 h375, 2. 独立功能快捷键与轮盘外观
     Gui, Config:Add, Text, x30 y180 w300 cGray, 语法：! = Alt，^ = Ctrl，+ = Shift`n特殊：vkC0 = · 键 (Esc下方波浪号)
 
     Gui, Config:Add, Text, x30 y225, 全局置顶按键:
@@ -115,28 +119,31 @@ ShowConfigGUI:
     Gui, Config:Add, Text, x30 y285, 实时预览面板:
     Gui, Config:Add, Edit, x150 y280 w170 vUI_Preview, %PreviewHotkey%
 
-    Gui, Config:Add, Text, x30 y315, 鼠标轮盘按键:
+    Gui, Config:Add, Text, x30 y315, 主轮盘按键:
     Gui, Config:Add, Edit, x150 y310 w170 vUI_Radial, %RadialHotkey%
-    Gui, Config:Add, Text, x30 y335 w290 cGray, 示例：!NumpadAdd 为 Alt+小键盘加号；!NumpadSub 为 Alt+小键盘减号
 
-    Gui, Config:Add, Text, x30 y365, 轮盘水平偏移:
-    Gui, Config:Add, Edit, x150 y360 w70 Number vUI_RadialOffsetX, %RadialOffsetX%
-    Gui, Config:Add, Text, x230 y365, 像素
+    Gui, Config:Add, Text, x30 y345, 备用轮盘按键:
+    Gui, Config:Add, Edit, x150 y340 w170 vUI_RadialAlt, %RadialHotkeyAlt%
+    Gui, Config:Add, Text, x30 y365 w290 cGray, 主键盘：!= 为 Alt+=；!- 为 Alt+-
 
-    Gui, Config:Add, Text, x30 y395, 轮盘垂直偏移:
-    Gui, Config:Add, Edit, x150 y390 w70 Number vUI_RadialOffsetY, %RadialOffsetY%
+    Gui, Config:Add, Text, x30 y395, 轮盘水平偏移:
+    Gui, Config:Add, Edit, x150 y390 w70 Number vUI_RadialOffsetX, %RadialOffsetX%
     Gui, Config:Add, Text, x230 y395, 像素
 
-    Gui, Config:Add, Text, x30 y425, 轮盘外半径:
-    Gui, Config:Add, Edit, x150 y420 w70 Number vUI_RadialSize, %RadialSize%
+    Gui, Config:Add, Text, x30 y425, 轮盘垂直偏移:
+    Gui, Config:Add, Edit, x150 y420 w70 Number vUI_RadialOffsetY, %RadialOffsetY%
     Gui, Config:Add, Text, x230 y425, 像素
 
-    Gui, Config:Add, Text, x30 y455, 弹出本配置页:
-    Gui, Config:Add, Edit, x150 y450 w170 vUI_Config, %ConfigHotkey%
+    Gui, Config:Add, Text, x30 y455, 轮盘外半径:
+    Gui, Config:Add, Edit, x150 y450 w70 Number vUI_RadialSize, %RadialSize%
+    Gui, Config:Add, Text, x230 y455, 像素
 
-    Gui, Config:Add, Button, x25 y515 w90 h35 gSaveConfig, 保存并重启
-    Gui, Config:Add, Button, x135 y515 w90 h35 gCloseConfig, 取消
-    Gui, Config:Add, Button, x245 y515 w90 h35 gResetConfig, 恢复默认
+    Gui, Config:Add, Text, x30 y485, 弹出本配置页:
+    Gui, Config:Add, Edit, x150 y480 w170 vUI_Config, %ConfigHotkey%
+
+    Gui, Config:Add, Button, x25 y545 w90 h35 gSaveConfig, 保存并重启
+    Gui, Config:Add, Button, x135 y545 w90 h35 gCloseConfig, 取消
+    Gui, Config:Add, Button, x245 y545 w90 h35 gResetConfig, 恢复默认
 
     Gui, Config:Show, , ⚙️ 快捷键配置中心
 return
@@ -144,6 +151,7 @@ return
 SaveConfig:
     Gui, Config:Submit
     UI_Radial := NormalizeRadialHotkey(UI_Radial)
+    UI_RadialAlt := NormalizeRadialHotkey(UI_RadialAlt)
     ; 提取下拉菜单中真实的符号 (例如把 "! (Alt)" 变回 "!")
     RegExMatch(UI_Trigger, "^[^\s]+", newTrigger)
     RegExMatch(UI_Bind, "^[^\s]+", newBind)
@@ -156,6 +164,7 @@ SaveConfig:
     IniWrite, %UI_Snapshot%, %IniFile%, Hotkeys, SnapshotHotkey
     IniWrite, %UI_Preview%, %IniFile%, Hotkeys, PreviewHotkey
     IniWrite, %UI_Radial%, %IniFile%, Hotkeys, RadialHotkey
+    IniWrite, %UI_RadialAlt%, %IniFile%, Hotkeys, RadialHotkeyAlt
     IniWrite, %UI_Config%, %IniFile%, Hotkeys, ConfigHotkey
     IniWrite, %UI_RadialOffsetX%, %IniFile%, RadialMenu, OffsetX
     IniWrite, %UI_RadialOffsetY%, %IniFile%, RadialMenu, OffsetY
@@ -357,7 +366,8 @@ RadialHandler:
     g_RadialOpen := true
     ShowRadialMenu()
     SetTimer, RadialSelectionTimer, 16
-    KeyWait, %RadialPhysicalKey%
+    radialPhysicalKey := RegExReplace(A_ThisHotkey, "^[\^\!\+\#\<\>\*\$~]+", "")
+    KeyWait, %radialPhysicalKey%
     SetTimer, RadialSelectionTimer, Off
     DestroyRadialMenu()
     g_RadialOpen := false
@@ -782,12 +792,10 @@ NormalizeRadialHotkey(hotkey) {
     hotkey := StrReplace(hotkey, "Numpad=", "NumpadAdd")
     hotkey := StrReplace(hotkey, "Numpad-", "NumpadSub")
 
-    if (hotkey = "!+" || hotkey = "!=" || hotkey = "Numpad=")
-        return "!NumpadAdd"
-    if (hotkey = "!-" || hotkey = "Numpad-")
-        return "!NumpadSub"
+    if (hotkey = "!+")
+        return "!="
     if (hotkey = "")
-        return "!NumpadAdd"
+        return "!="
     return hotkey
 }
 
