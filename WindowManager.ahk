@@ -23,6 +23,9 @@ IniRead, RadialHotkeyAlt, %IniFile%, Hotkeys, RadialHotkeyAlt, !-
 IniRead, RadialOffsetX, %IniFile%, RadialMenu, OffsetX, 0
 IniRead, RadialOffsetY, %IniFile%, RadialMenu, OffsetY, 0
 IniRead, RadialSize, %IniFile%, RadialMenu, Size, 220
+IniRead, RadialNormalColor, %IniFile%, RadialMenu, NormalColor, 3A4658
+IniRead, RadialSelectedColor, %IniFile%, RadialMenu, SelectedColor, 4FC3F7
+IniRead, RadialCenterColor, %IniFile%, RadialMenu, CenterColor, 202833
 IniRead, ConfigHotkey, %IniFile%, Hotkeys, ConfigHotkey, ^!vkC0
 RadialHotkey := NormalizeRadialHotkey(RadialHotkey)
 RadialHotkeyAlt := NormalizeRadialHotkey(RadialHotkeyAlt)
@@ -57,12 +60,16 @@ global g_RadialOuterRadius := Max(120, RadialSize + 0)
 global g_RadialInnerRadius := Round(g_RadialOuterRadius * 0.645)
 global g_RadialPreviewWidth := Round(g_RadialOuterRadius * 1.18)
 global g_RadialPreviewHeight := Round(g_RadialOuterRadius * 0.4)
+global g_RadialNormalColor := NormalizeColor(RadialNormalColor, "3A4658")
+global g_RadialSelectedColor := NormalizeColor(RadialSelectedColor, "4FC3F7")
+global g_RadialCenterColor := NormalizeColor(RadialCenterColor, "202833")
 global g_RadialGapDegrees := 2
 global g_RadialMenuPadding := 8
 global g_RadialDeadZone := g_RadialInnerRadius
 global g_RadialHwnd := 0
 global g_RadialSectorHwnds := []
 global g_RadialCenterControlHwnd := 0
+global g_RadialIconControlHwnd := 0
 global g_RadialIgnoreCursorDelta := false
 
 ; =======================================================
@@ -107,7 +114,7 @@ ShowConfigGUI:
     Gui, Config:Add, Text, x30 y110, 解绑窗口修饰键:
     Gui, Config:Add, DropDownList, x150 y105 w170 vUI_Unbind, % BuildDDL(g_UnbindModifier)
 
-    Gui, Config:Add, GroupBox, x15 y155 w330 h375, 2. 独立功能快捷键与轮盘外观
+    Gui, Config:Add, GroupBox, x15 y155 w330 h465, 2. 独立功能快捷键与轮盘外观
     Gui, Config:Add, Text, x30 y180 w300 cGray, 语法：! = Alt，^ = Ctrl，+ = Shift`n特殊：vkC0 = · 键 (Esc下方波浪号)
 
     Gui, Config:Add, Text, x30 y225, 全局置顶按键:
@@ -138,12 +145,22 @@ ShowConfigGUI:
     Gui, Config:Add, Edit, x150 y450 w70 Number vUI_RadialSize, %RadialSize%
     Gui, Config:Add, Text, x230 y455, 像素
 
-    Gui, Config:Add, Text, x30 y485, 弹出本配置页:
-    Gui, Config:Add, Edit, x150 y480 w170 vUI_Config, %ConfigHotkey%
+    Gui, Config:Add, Text, x30 y485, 普通扇区颜色:
+    Gui, Config:Add, Edit, x150 y480 w100 vUI_RadialNormalColor, %RadialNormalColor%
 
-    Gui, Config:Add, Button, x25 y545 w90 h35 gSaveConfig, 保存并重启
-    Gui, Config:Add, Button, x135 y545 w90 h35 gCloseConfig, 取消
-    Gui, Config:Add, Button, x245 y545 w90 h35 gResetConfig, 恢复默认
+    Gui, Config:Add, Text, x30 y515, 选中扇区颜色:
+    Gui, Config:Add, Edit, x150 y510 w100 vUI_RadialSelectedColor, %RadialSelectedColor%
+
+    Gui, Config:Add, Text, x30 y545, 中心预览颜色:
+    Gui, Config:Add, Edit, x150 y540 w100 vUI_RadialCenterColor, %RadialCenterColor%
+    Gui, Config:Add, Text, x30 y565 w280 cGray, 填写 6 位十六进制色值，例如 #202833
+
+    Gui, Config:Add, Text, x30 y595, 弹出本配置页:
+    Gui, Config:Add, Edit, x150 y590 w170 vUI_Config, %ConfigHotkey%
+
+    Gui, Config:Add, Button, x25 y655 w90 h35 gSaveConfig, 保存并重启
+    Gui, Config:Add, Button, x135 y655 w90 h35 gCloseConfig, 取消
+    Gui, Config:Add, Button, x245 y655 w90 h35 gResetConfig, 恢复默认
 
     Gui, Config:Show, , ⚙️ 快捷键配置中心
 return
@@ -152,6 +169,9 @@ SaveConfig:
     Gui, Config:Submit
     UI_Radial := NormalizeRadialHotkey(UI_Radial)
     UI_RadialAlt := NormalizeRadialHotkey(UI_RadialAlt)
+    UI_RadialNormalColor := NormalizeColor(UI_RadialNormalColor, "3A4658")
+    UI_RadialSelectedColor := NormalizeColor(UI_RadialSelectedColor, "4FC3F7")
+    UI_RadialCenterColor := NormalizeColor(UI_RadialCenterColor, "202833")
     ; 提取下拉菜单中真实的符号 (例如把 "! (Alt)" 变回 "!")
     RegExMatch(UI_Trigger, "^[^\s]+", newTrigger)
     RegExMatch(UI_Bind, "^[^\s]+", newBind)
@@ -169,7 +189,10 @@ SaveConfig:
     IniWrite, %UI_RadialOffsetX%, %IniFile%, RadialMenu, OffsetX
     IniWrite, %UI_RadialOffsetY%, %IniFile%, RadialMenu, OffsetY
     IniWrite, %UI_RadialSize%, %IniFile%, RadialMenu, Size
-    
+    IniWrite, %UI_RadialNormalColor%, %IniFile%, RadialMenu, NormalColor
+    IniWrite, %UI_RadialSelectedColor%, %IniFile%, RadialMenu, SelectedColor
+    IniWrite, %UI_RadialCenterColor%, %IniFile%, RadialMenu, CenterColor
+
     ShowOSD("✅ 配置已保存，正在生效...")
     Sleep, 1000
     Reload
@@ -394,19 +417,21 @@ CollectRadialItems() {
             continue
         }
 
-        WinGetTitle, title, ahk_id %hwnd%
-        if (title == "")
-            title := "无标题窗口"
+        WinGetTitle, fullTitle, ahk_id %hwnd%
+        if (fullTitle == "")
+            fullTitle := "无标题窗口"
+        title := fullTitle
         if (StrLen(title) > 14)
             title := SubStr(title, 1, 13) . "..."
-        g_RadialItems.Push({key: key, hwnd: hwnd, app: GetAppName(hwnd), title: title})
+        g_RadialItems.Push({key: key, hwnd: hwnd, app: GetAppName(hwnd), title: title, fullTitle: fullTitle})
     }
 }
 
 ShowRadialMenu() {
     global g_RadialItems, g_RadialCenterX, g_RadialCenterY, g_RadialOuterRadius
     global g_RadialInnerRadius, g_RadialPreviewWidth, g_RadialPreviewHeight, g_RadialGapDegrees, g_RadialMenuPadding
-    global g_RadialHwnd, g_RadialSectorHwnds, g_RadialCenterControlHwnd, RadialCenterControlHwnd
+    global g_RadialNormalColor, g_RadialHwnd, g_RadialSectorHwnds, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
+    global RadialCenterControlHwnd, RadialIconControlHwnd
 
     DestroyRadialMenu()
     g_RadialSectorHwnds := []
@@ -421,7 +446,7 @@ ShowRadialMenu() {
         sectorIndex := A_Index
         startAngle := -90 + (sectorIndex - 1) * angleStep + g_RadialGapDegrees / 2
         sweepAngle := angleStep - g_RadialGapDegrees
-        CreateRadialSector(sectorIndex, menuX, menuY, diameter, center, startAngle, sweepAngle, "3A4658")
+        CreateRadialSector(sectorIndex, menuX, menuY, diameter, center, startAngle, sweepAngle, g_RadialNormalColor)
     }
 
     centerX := g_RadialCenterX - Floor(g_RadialPreviewWidth / 2)
@@ -429,10 +454,17 @@ ShowRadialMenu() {
     Gui, RadialCenter:Destroy
     Gui, RadialCenter:+AlwaysOnTop -Caption +ToolWindow +LastFound +E0x20
     g_RadialHwnd := WinExist()
-    Gui, RadialCenter:Color, 202833
+    iconY := Floor((g_RadialPreviewHeight - 32) / 2)
+    textX := 42
+    textWidth := g_RadialPreviewWidth - textX - 5
+    textHeight := g_RadialPreviewHeight - 10
+    Gui, RadialCenter:Color, %g_RadialCenterColor%
+    Gui, RadialCenter:Add, Picture, x5 y%iconY% w32 h32 hwndRadialIconControlHwnd
     Gui, RadialCenter:Font, s10 cFFFFFF w700, Microsoft YaHei
-    Gui, RadialCenter:Add, Text, x0 y12 w%g_RadialPreviewWidth% h64 Center hwndRadialCenterControlHwnd, 移动鼠标`n选择窗口
+    Gui, RadialCenter:Add, Text, x%textX% y5 w%textWidth% h%textHeight% Left hwndRadialCenterControlHwnd, 移动鼠标选择窗口
+    g_RadialIconControlHwnd := RadialIconControlHwnd
     g_RadialCenterControlHwnd := RadialCenterControlHwnd
+    GuiControl, RadialCenter:Hide, %g_RadialIconControlHwnd%
     Gui, RadialCenter:Show, NoActivate x%centerX% y%centerY% w%g_RadialPreviewWidth% h%g_RadialPreviewHeight%
     WinSet, Region, 0-0 w%g_RadialPreviewWidth% h%g_RadialPreviewHeight% R8-8, ahk_id %g_RadialHwnd%
     WinSet, Transparent, 245, ahk_id %g_RadialHwnd%
@@ -518,7 +550,7 @@ SetCursorScreenPos(x, y) {
 }
 
 DestroyRadialMenu() {
-    global g_RadialItems, g_RadialCenterControlHwnd
+    global g_RadialItems, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
 
     Loop, % g_RadialItems.Length() {
         guiName := "RadialSector" . A_Index
@@ -526,6 +558,7 @@ DestroyRadialMenu() {
     }
     Gui, RadialCenter:Destroy
     g_RadialCenterControlHwnd := 0
+    g_RadialIconControlHwnd := 0
 }
 
 UpdateRadialSelection() {
@@ -557,11 +590,13 @@ UpdateRadialSelection() {
 }
 
 UpdateRadialHighlight() {
-    global g_RadialItems, g_RadialSelected, g_RadialSectorHwnds, g_RadialCenterControlHwnd
+    global g_RadialItems, g_RadialSelected, g_RadialSectorHwnds
+    global g_RadialCenterControlHwnd, g_RadialIconControlHwnd
+    global g_RadialNormalColor, g_RadialSelectedColor
 
     Loop, % g_RadialItems.Length() {
         guiName := "RadialSector" . A_Index
-        color := (A_Index == g_RadialSelected) ? "4FC3F7" : "3A4658"
+        color := (A_Index == g_RadialSelected) ? g_RadialSelectedColor : g_RadialNormalColor
         Gui, %guiName%:Color, %color%
         sectorHwnd := g_RadialSectorHwnds[A_Index]
         opacity := (A_Index == g_RadialSelected) ? 250 : 225
@@ -570,11 +605,14 @@ UpdateRadialHighlight() {
 
     if (g_RadialSelected) {
         item := g_RadialItems[g_RadialSelected]
-        centerText := "[" . item.key . "] " . item.app . "`n" . item.title
+        iconSpec := "HICON:*" . GetWindowIcon(item.hwnd)
+        GuiControl, RadialCenter:, %g_RadialIconControlHwnd%, %iconSpec%
+        GuiControl, RadialCenter:Show, %g_RadialIconControlHwnd%
+        GuiControl, RadialCenter:, %g_RadialCenterControlHwnd%, % item.fullTitle
     } else {
-        centerText := "移动鼠标`n选择窗口"
+        GuiControl, RadialCenter:Hide, %g_RadialIconControlHwnd%
+        GuiControl, RadialCenter:, %g_RadialCenterControlHwnd%, 移动鼠标选择窗口
     }
-    GuiControl, RadialCenter:, %g_RadialCenterControlHwnd%, %centerText%
 }
 
 ActivateRadialWindow(key) {
@@ -783,6 +821,35 @@ NormalizeRadialHotkey(hotkey) {
     if (hotkey = "")
         return "!="
     return hotkey
+}
+
+NormalizeColor(color, fallback) {
+    color := Trim(StrReplace(color, "#", ""))
+    if (!RegExMatch(color, "i)^[0-9a-f]{6}$"))
+        return fallback
+    StringUpper, color, color
+    return color
+}
+
+GetWindowIcon(hwnd) {
+    static WM_GETICON := 0x7F
+    static ICON_SMALL2 := 2
+    static ICON_SMALL := 0
+    static GCLP_HICONSM := -34
+    static GCLP_HICON := -14
+    static IDI_APPLICATION := 32512
+
+    icon := DllCall("SendMessage", "Ptr", hwnd, "UInt", WM_GETICON, "Ptr", ICON_SMALL2, "Ptr", 0, "Ptr")
+    if (!icon)
+        icon := DllCall("SendMessage", "Ptr", hwnd, "UInt", WM_GETICON, "Ptr", ICON_SMALL, "Ptr", 0, "Ptr")
+    classLong := A_PtrSize ? "GetClassLongPtr" : "GetClassLong"
+    if (!icon)
+        icon := DllCall(classLong, "Ptr", hwnd, "Int", GCLP_HICONSM, "Ptr")
+    if (!icon)
+        icon := DllCall(classLong, "Ptr", hwnd, "Int", GCLP_HICON, "Ptr")
+    if (!icon)
+        icon := DllCall("LoadIcon", "Ptr", 0, "Ptr", IDI_APPLICATION, "Ptr")
+    return icon
 }
 
 ; 把底层特殊键格式化成能看懂的人话
