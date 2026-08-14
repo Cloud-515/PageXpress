@@ -555,7 +555,7 @@ CheckCamouflageWindows() {
 }
 
 ShowWindowMenu(hwnd) {
-    global g_WindowMenuOpen
+    global g_WindowMenuOpen, UI_WindowOpacity, WindowOpacityValue
 
     DestroyWindowMenu()
     state := EnsureWindowState(hwnd)
