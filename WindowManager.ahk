@@ -58,6 +58,7 @@ global g_RadialInnerRadius := Round(g_RadialOuterRadius * 0.645)
 global g_RadialPreviewWidth := Round(g_RadialOuterRadius * 1.18)
 global g_RadialPreviewHeight := Round(g_RadialOuterRadius * 0.4)
 global g_RadialGapDegrees := 2
+global g_RadialSelectionHysteresis := 6
 global g_RadialMenuPadding := 8
 global g_RadialDeadZone := g_RadialInnerRadius
 global g_RadialHwnd := 0
@@ -431,7 +432,7 @@ ShowRadialMenu() {
     g_RadialHwnd := WinExist()
     Gui, RadialCenter:Color, 202833
     Gui, RadialCenter:Font, s10 cFFFFFF w700, Microsoft YaHei
-    Gui, RadialCenter:Add, Text, x12 y12 w%g_RadialPreviewWidth% h64 Center hwndRadialCenterControlHwnd, 移动鼠标`n选择窗口
+    Gui, RadialCenter:Add, Text, x0 y12 w%g_RadialPreviewWidth% h64 Center hwndRadialCenterControlHwnd, 移动鼠标`n选择窗口
     g_RadialCenterControlHwnd := RadialCenterControlHwnd
     Gui, RadialCenter:Show, NoActivate x%centerX% y%centerY% w%g_RadialPreviewWidth% h%g_RadialPreviewHeight%
     WinSet, Region, 0-0 w%g_RadialPreviewWidth% h%g_RadialPreviewHeight% R8-8, ahk_id %g_RadialHwnd%
@@ -529,30 +530,15 @@ DestroyRadialMenu() {
 }
 
 UpdateRadialSelection() {
-    global g_RadialLastMouseX, g_RadialLastMouseY, g_RadialVirtualX, g_RadialVirtualY
-    global g_RadialCenterX, g_RadialCenterY, g_RadialInnerRadius, g_RadialOuterRadius
-    global g_RadialItems, g_RadialSelected
+    global g_RadialCenterX, g_RadialCenterY, g_RadialInnerRadius
+    global g_RadialItems, g_RadialSelected, g_RadialSelectionHysteresis
 
     GetCursorScreenPos(mouseX, mouseY)
-    g_RadialVirtualX += mouseX - g_RadialLastMouseX
-    g_RadialVirtualY += mouseY - g_RadialLastMouseY
-    g_RadialLastMouseX := mouseX
-    g_RadialLastMouseY := mouseY
-
-    relativeX := g_RadialVirtualX - g_RadialCenterX
-    relativeY := g_RadialVirtualY - g_RadialCenterY
+    relativeX := mouseX - g_RadialCenterX
+    relativeY := mouseY - g_RadialCenterY
     distance := Sqrt(relativeX * relativeX + relativeY * relativeY)
-    maxDistance := g_RadialOuterRadius - 4
-    if (distance > maxDistance) {
-        scale := maxDistance / distance
-        relativeX *= scale
-        relativeY *= scale
-        g_RadialVirtualX := g_RadialCenterX + relativeX
-        g_RadialVirtualY := g_RadialCenterY + relativeY
-        distance := maxDistance
-    }
-
     newSelection := 0
+
     if (distance >= g_RadialInnerRadius) {
         angle := DllCall("msvcrt\atan2", "Double", relativeY, "Double", relativeX, "CDecl Double") * 57.295779513082
         if (angle < 0)
@@ -562,6 +548,13 @@ UpdateRadialSelection() {
         newSelection := Floor((angle + angleStep / 2) / angleStep) + 1
         if (newSelection > g_RadialItems.Length())
             newSelection := 1
+
+        if (g_RadialSelected && newSelection != g_RadialSelected) {
+            selectedCenter := (g_RadialSelected - 1) * angleStep
+            angularDistance := Abs(Mod(angle - selectedCenter + 540, 360) - 180)
+            if (angularDistance < angleStep / 2 + g_RadialSelectionHysteresis)
+                newSelection := g_RadialSelected
+        }
     }
 
     if (newSelection != g_RadialSelected) {
