@@ -1,4 +1,4 @@
-# TypeReader
+# PageXpress
 
 一个基于 AutoHotkey v1 的 Windows 窗口管理工具。它通过快捷键、轮盘和可视化迷彩区域，让常用窗口可以快速呼出、预览、隐藏和调整。
 
