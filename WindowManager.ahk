@@ -420,6 +420,16 @@ CamouflageTimer:
         ReleaseCamouflageRegions()
 return
 
+; -------------------------------------------------------
+; 控制条各控件的响应处理器
+;
+; 统一原则：状态变更一律"增量刷新"，绝不重建整条。
+; 重建（Gui,Destroy 后重新 ShowWindowMenu）会带来两个副作用：
+;   1. ShowWindowMenu 会重新采样 resizeBaseWidth/Height，已缩放的窗口会把当前尺寸误当成 100% 基准，
+;      宽高滑块随之跳回 100；
+;   2. 启用迷彩会先把窗口最小化，此时 WinGetPos 拿到的是 -32000，被工作区钳制后整条会跑到屏幕左上角。
+; 所以下面各处理器只用 GuiControl 改动受影响的那一两个控件。
+; -------------------------------------------------------
 WindowMenuOpacityChanged:
     Gui, WindowMenu:Submit, NoHide
     opacity := Round(UI_WindowOpacity * 2.55)
@@ -427,26 +437,28 @@ WindowMenuOpacityChanged:
     GuiControl, WindowMenu:, WindowOpacityValue, % UI_WindowOpacity . "%"
 return
 WindowMenuCamouflage:
-    state := EnsureWindowState(g_WindowMenuTargetHwnd)
-    SetCamouflage(g_WindowMenuTargetHwnd, !state.camouflageEnabled)
-    RefreshWindowMenu()
+    Gui, WindowMenu:Submit, NoHide
+    SetCamouflage(g_WindowMenuTargetHwnd, UI_WindowCamouflage)
+    ; 启用成功时 SetCamouflage 会自行关闭控制条（窗口已最小化，控制条没有依附对象了）；
+    ; 启用失败时（窗口本来就是最小化状态）控制条仍在，此时必须把勾选态拨回真实状态，否则显示与实际脱节。
+    SyncWindowMenuToggles(g_WindowMenuTargetHwnd)
 return
 WindowMenuTriggerSmall:
     SetCamouflageSize(g_WindowMenuTargetHwnd, 160, 90)
-    RefreshWindowMenu()
+    UpdateWindowMenuTriggerValue(g_WindowMenuTargetHwnd)
 return
 WindowMenuTriggerMedium:
     SetCamouflageSize(g_WindowMenuTargetHwnd, 240, 135)
-    RefreshWindowMenu()
+    UpdateWindowMenuTriggerValue(g_WindowMenuTargetHwnd)
 return
 WindowMenuTriggerLarge:
     SetCamouflageSize(g_WindowMenuTargetHwnd, 320, 180)
-    RefreshWindowMenu()
+    UpdateWindowMenuTriggerValue(g_WindowMenuTargetHwnd)
 return
 WindowMenuTopmost:
-    state := EnsureWindowState(g_WindowMenuTargetHwnd)
-    SetWindowTopmost(g_WindowMenuTargetHwnd, !state.alwaysOnTop)
-    RefreshWindowMenu()
+    ; 复选框的勾选状态就是目标状态，直接取值，不必再读旧状态取反
+    Gui, WindowMenu:Submit, NoHide
+    SetWindowTopmost(g_WindowMenuTargetHwnd, UI_WindowTopmost)
 return
 WindowMenuBindChanged:
     Gui, WindowMenu:Submit, NoHide
@@ -455,6 +467,67 @@ WindowMenuBindChanged:
     else
         BindWindowToKey(g_WindowMenuTargetHwnd, UI_WindowMenuBind)
 return
+WindowMenuResizeByWidth:
+    Gui, WindowMenu:Submit, NoHide
+    state := EnsureWindowState(g_WindowMenuTargetHwnd)
+    requestedWidth := Round(state.resizeBaseWidth * UI_WindowWidthScale / 100)
+    ResizeTargetWindow(g_WindowMenuTargetHwnd, requestedWidth, 0, "width", UI_WindowAspectLocked)
+    UpdateWindowMenuSizeValues(g_WindowMenuTargetHwnd)
+return
+WindowMenuResizeByHeight:
+    Gui, WindowMenu:Submit, NoHide
+    state := EnsureWindowState(g_WindowMenuTargetHwnd)
+    requestedHeight := Round(state.resizeBaseHeight * UI_WindowHeightScale / 100)
+    ResizeTargetWindow(g_WindowMenuTargetHwnd, 0, requestedHeight, "height", UI_WindowAspectLocked)
+    UpdateWindowMenuSizeValues(g_WindowMenuTargetHwnd)
+return
+WindowMenuAspectChanged:
+    Gui, WindowMenu:Submit, NoHide
+    state := EnsureWindowState(g_WindowMenuTargetHwnd)
+    state.aspectRatioLocked := UI_WindowAspectLocked
+    if (state.aspectRatioLocked)
+        CaptureWindowAspectRatio(g_WindowMenuTargetHwnd)
+    UpdateWindowMenuSizeValues(g_WindowMenuTargetHwnd)
+return
+
+; 增量刷新：把窗口的实际宽高写回读数，并让两个滑块位置与实际尺寸对齐
+; （窗口被锁定比例联动、或被外部程序改过大小时，滑块不能停在旧位置）
+UpdateWindowMenuSizeValues(hwnd) {
+    if (!WinExist("ahk_id " . hwnd))
+        return
+    state := EnsureWindowState(hwnd)
+    WinGetPos,,, width, height, ahk_id %hwnd%
+    GuiControl, WindowMenu:, WindowMenuWidthValue, % width . " px"
+    GuiControl, WindowMenu:, WindowMenuHeightValue, % height . " px"
+    if (state.resizeBaseWidth > 0)
+        GuiControl, WindowMenu:, UI_WindowWidthScale, % Max(1, Min(200, Round(width * 100 / state.resizeBaseWidth)))
+    if (state.resizeBaseHeight > 0)
+        GuiControl, WindowMenu:, UI_WindowHeightScale, % Max(1, Min(200, Round(height * 100 / state.resizeBaseHeight)))
+}
+
+; 增量刷新：只改触发区域的尺寸读数（"240 × 135"），不动其他控件
+UpdateWindowMenuTriggerValue(hwnd) {
+    global g_WindowMenuOpen
+
+    if (!g_WindowMenuOpen)
+        return
+    state := EnsureWindowState(hwnd)
+    GuiControl, WindowMenu:, WindowMenuTriggerValue, % state.triggerWidth . " × " . state.triggerHeight
+}
+
+; 增量刷新：把置顶 / 迷彩两个复选框拨回窗口的真实状态。
+; 用于操作可能失败的场合——例如窗口已最小化时 SetCamouflage 会直接返回、并不真的启用迷彩，
+; 此时复选框已被用户勾上，必须回读 state 纠正，否则显示与实际不一致。
+; 注：GuiControl 改变勾选状态不会触发控件自身的 g 标签，不存在递归。
+SyncWindowMenuToggles(hwnd) {
+    global g_WindowMenuOpen, UI_WindowCamouflage, UI_WindowTopmost
+
+    if (!g_WindowMenuOpen)
+        return
+    state := EnsureWindowState(hwnd)
+    GuiControl, WindowMenu:, UI_WindowCamouflage, % state.camouflageEnabled ? 1 : 0
+    GuiControl, WindowMenu:, UI_WindowTopmost, % state.alwaysOnTop ? 1 : 0
+}
 
 GetWindowBindingKey(hwnd) {
     global KeyList, WindowBindings
@@ -517,8 +590,124 @@ EnsureWindowState(hwnd) {
     global WindowStateByHwnd
 
     if (!WindowStateByHwnd.HasKey(hwnd))
-        WindowStateByHwnd[hwnd] := {opacity: 255, alwaysOnTop: false, camouflageEnabled: false, camouflageHidden: false, triggerWidth: 240, triggerHeight: 135, x: 0, y: 0, width: 0, height: 0, triggerX: 0, triggerY: 0, hoverArmed: true, hideAt: 0, editX: 0, editY: 0, editWidth: 0, editHeight: 0, dragMode: "", dragStartX: 0, dragStartY: 0, dragStartLeft: 0, dragStartTop: 0, dragStartWidth: 0, dragStartHeight: 0}
+        WindowStateByHwnd[hwnd] := {opacity: 255, alwaysOnTop: false, camouflageEnabled: false, camouflageHidden: false, triggerWidth: 240, triggerHeight: 135, x: 0, y: 0, width: 0, height: 0, triggerX: 0, triggerY: 0, hoverArmed: true, hideAt: 0, editX: 0, editY: 0, editWidth: 0, editHeight: 0, aspectRatio: 0, aspectRatioLocked: true, resizeBaseWidth: 0, resizeBaseHeight: 0, preserveSize: false, preserveWidth: 0, preserveHeight: 0, preserveLastX: 0, preserveLastY: 0, preserveHasPosition: false, preservePending: false, dragMode: "", dragStartX: 0, dragStartY: 0, dragStartLeft: 0, dragStartTop: 0, dragStartWidth: 0, dragStartHeight: 0}
     return WindowStateByHwnd[hwnd]
+}
+
+CaptureWindowAspectRatio(hwnd) {
+    state := EnsureWindowState(hwnd)
+    if (!WinExist("ahk_id " . hwnd))
+        return false
+    WinGetPos,,, width, height, ahk_id %hwnd%
+    if (width < 1 || height < 1)
+        return false
+    state.aspectRatio := width / height
+    return true
+}
+
+ResizeTargetWindow(hwnd, requestedWidth, requestedHeight, resizeBy, keepAspectRatio) {
+    if (!WinExist("ahk_id " . hwnd)) {
+        ShowOSD("目标窗口已关闭")
+        return false
+    }
+
+    state := EnsureWindowState(hwnd)
+    WinGetPos, x, y, currentWidth, currentHeight, ahk_id %hwnd%
+    if (currentWidth < 1 || currentHeight < 1) {
+        ShowOSD("无法读取窗口尺寸")
+        return false
+    }
+    if (!state.aspectRatio || !state.aspectRatioLocked)
+        state.aspectRatio := currentWidth / currentHeight
+    state.aspectRatioLocked := keepAspectRatio
+
+    if (resizeBy = "width") {
+        newWidth := Max(1, Round(requestedWidth))
+        newHeight := keepAspectRatio ? Max(1, Round(newWidth / state.aspectRatio)) : currentHeight
+    } else {
+        newHeight := Max(1, Round(requestedHeight))
+        newWidth := keepAspectRatio ? Max(1, Round(newHeight * state.aspectRatio)) : currentWidth
+    }
+
+    resizeSucceeded := ForceResizeTargetWindow(hwnd, x, y, newWidth, newHeight)
+    WinGetPos, newX, newY, actualWidth, actualHeight, ahk_id %hwnd%
+    state.x := newX, state.y := newY, state.width := actualWidth, state.height := actualHeight
+    if (keepAspectRatio && actualHeight)
+        state.aspectRatio := actualWidth / actualHeight
+    if (state.camouflageEnabled)
+        UpdateCamouflageTrigger(hwnd)
+    if (!resizeSucceeded) {
+        ShowOSD("目标程序拒绝该窗口尺寸: " . actualWidth . " x " . actualHeight)
+        return false
+    }
+    if (actualWidth < 1 || actualHeight < 1)
+        return false
+    state.preserveSize := true
+    state.preserveWidth := actualWidth
+    state.preserveHeight := actualHeight
+    state.preserveLastX := newX
+    state.preserveLastY := newY
+    state.preserveHasPosition := true
+    state.preservePending := false
+    return true
+}
+
+ForceResizeTargetWindow(hwnd, x, y, width, height) {
+    flags := 0x0414
+    Loop, 3 {
+        if (!DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", 0, "Int", x, "Int", y, "Int", width, "Int", height, "UInt", flags))
+            break
+        Sleep, 1
+        WinGetPos,,, actualWidth, actualHeight, ahk_id %hwnd%
+        if (actualWidth = width && actualHeight = height)
+            return true
+    }
+    return false
+}
+
+PreserveTargetWindowSize(hwnd) {
+    state := EnsureWindowState(hwnd)
+    if (!state.preserveSize || !WinExist("ahk_id " . hwnd) || state.camouflageHidden)
+        return
+
+    WinGet, minMax, MinMax, ahk_id %hwnd%
+    if (minMax = -1)
+        return
+
+    WinGetPos, currentX, currentY, currentWidth, currentHeight, ahk_id %hwnd%
+    if (currentWidth < 1 || currentHeight < 1)
+        return
+
+    if (!state.preserveHasPosition) {
+        state.preserveLastX := currentX
+        state.preserveLastY := currentY
+        state.preserveHasPosition := true
+        return
+    }
+
+    if (currentX != state.preserveLastX || currentY != state.preserveLastY) {
+        state.preserveLastX := currentX
+        state.preserveLastY := currentY
+        state.preservePending := true
+    }
+
+    if (currentWidth != state.preserveWidth || currentHeight != state.preserveHeight)
+        state.preservePending := true
+
+    if (GetKeyState("LButton", "P") || !state.preservePending)
+        return
+
+    state.preservePending := false
+    if (currentWidth != state.preserveWidth || currentHeight != state.preserveHeight)
+        ForceResizeTargetWindow(hwnd, currentX, currentY, state.preserveWidth, state.preserveHeight)
+
+    WinGetPos, actualX, actualY, actualWidth, actualHeight, ahk_id %hwnd%
+    state.x := actualX, state.y := actualY, state.width := actualWidth, state.height := actualHeight
+    state.preserveLastX := actualX
+    state.preserveLastY := actualY
+    state.preserveHasPosition := true
+    if (state.camouflageEnabled && !state.camouflageHidden)
+        UpdateCamouflageTrigger(hwnd)
 }
 
 UpdateCamouflageTrigger(hwnd) {
@@ -733,6 +922,8 @@ RevealCamouflageWindow(hwnd, activate := false) {
     if (state.alwaysOnTop)
         WinSet, AlwaysOnTop, On, ahk_id %hwnd%
     state.camouflageHidden := false
+    if (state.preserveSize)
+        state.preservePending := true
     if (activate)
         WinActivate, ahk_id %hwnd%
 }
@@ -746,11 +937,12 @@ CheckCamouflageWindows() {
             WindowStateByHwnd.Delete(hwnd)
             continue
         }
-        insideTrigger := mouseX >= state.triggerX && mouseX <= state.triggerX + state.triggerWidth && mouseY >= state.triggerY && mouseY <= state.triggerY + state.triggerHeight
         if (hwnd = g_RadialPreviewHwnd) {
             state.hideAt := 0
             continue
         }
+        PreserveTargetWindowSize(hwnd)
+        insideTrigger := mouseX >= state.triggerX && mouseX <= state.triggerX + state.triggerWidth && mouseY >= state.triggerY && mouseY <= state.triggerY + state.triggerHeight
         if (state.camouflageEnabled && !state.camouflageHidden)
             UpdateCamouflageTrigger(hwnd)
         if (state.camouflageEnabled && IsCamouflageEditKeyDown()) {
@@ -802,17 +994,46 @@ IsWindowMenuUnderCursor(hwnd, mouseX, mouseY) {
     return mouseX >= menuX && mouseX <= menuX + menuWidth && mouseY >= menuY && mouseY <= menuY + menuHeight
 }
 
+; -------------------------------------------------------
+; 控制条布局规范（坐标契约，改动前请先读）
+;
+;   外边距 14 ┊ 列间距 20（间距正中一条 1px 分隔线）┊ 整条 704 × 100
+;
+;   ┌──────────────────────┬─────────────┬──────────┬─────────────────────┬──┐
+;   │ 透明度               │ 触发区域    │ 绑定     │ 窗口大小  ☑锁定比例 │ ×│  ← 标题行 y8
+;   │ ▬▬▬▬●▬▬ 100%         │ [S][M][L]   │ [无   ▾] │ 宽 ▬▬●▬ 1920 px     │  │  ← B 行 y28
+;   │ ☐置顶  ☐迷彩         │  240 × 135  │ 已占用 3 │ 高 ▬▬●▬ 1080 px     │  │  ← C 行 y60
+;   └──────────────────────┴─────────────┴──────────┴─────────────────────┴──┘
+;    x14         x196   x216       x338 x358   x462 x482            x688
+;
+; 三条硬规则：
+;   1. 控件顶边只允许取 y28 或 y60，行高统一 26，否则同一行会出现视觉错位。
+;   2. 列的左边界只允许取 x14 / x216 / x358 / x482；分隔线固定在 x206 / x348 / x472
+;      （即相邻两列边界的正中）。挪动列宽时必须同步挪分隔线。
+;   3. 字体分三级依次落笔：标题 s8 暗 → 控件 s9 白 → 次要读数 s8 更暗。
+;      AHK v1 的 Gui,Font 是"当前状态"，后续 Add 全部继承，所以顺序不能打乱。
+;
+; 注：坐标是逻辑像素，AHK v1 默认按系统 DPI 缩放（125% 下整条实际 880 物理像素宽）。
+; -------------------------------------------------------
 ShowWindowMenu(hwnd) {
-    global g_WindowMenuOpen, g_WindowMenuHwnd, UI_WindowOpacity, UI_WindowMenuBind, WindowOpacityValue
+    global g_WindowMenuOpen, g_WindowMenuHwnd, UI_WindowOpacity, UI_WindowMenuBind, UI_WindowWidthScale, UI_WindowHeightScale, UI_WindowAspectLocked, UI_WindowTopmost, UI_WindowCamouflage, WindowOpacityValue, WindowMenuWidthValue, WindowMenuHeightValue, WindowMenuTriggerValue, WindowMenuBindHint
 
     DestroyWindowMenu()
     state := EnsureWindowState(hwnd)
     WinGetPos, x, y, width, height, ahk_id %hwnd%
-    menuWidth := 590, menuHeight := 76
+    ; 以当前尺寸作为宽高滑块 100% 的基准。只在整条新建时采样一次：
+    ; 状态变更若走重建，这里会被反复重新采样，导致已缩放的窗口把当前尺寸误当成新基准。
+    state.resizeBaseWidth := width
+    state.resizeBaseHeight := height
+    if (state.aspectRatioLocked)
+        state.aspectRatio := width / height
+    menuWidth := 704, menuHeight := 100
     opacityPercent := Round(state.opacity / 2.55)
+    ; 默认贴在目标窗口正上方居中
     menuX := x + Round((width - menuWidth) / 2)
     menuY := y - menuHeight - 8
 
+    ; 顶部空间不够时翻到窗口下方，再整体收进工作区，避免整条被屏幕边缘截断
     SysGet, targetMonitor, Monitor, ahk_id %hwnd%
     SysGet, workArea, MonitorWorkArea, %targetMonitor%
     workLeft := workAreaLeft
@@ -826,37 +1047,71 @@ ShowWindowMenu(hwnd) {
     Gui, WindowMenu:+AlwaysOnTop -Caption +ToolWindow +HwndWindowMenuHwnd
     g_WindowMenuHwnd := WindowMenuHwnd
     Gui, WindowMenu:Color, 202833
+
+    ; 分组分隔线：1px 宽的 Progress 只露出 Background 颜色，是 AHK v1 画彩色细线的常规做法
+    for index, sepX in [206, 348, 472]
+        Gui, WindowMenu:Add, Progress, x%sepX% y16 w1 h68 Background303B4A
+
+    ; ---- 第一级：列标题。小一号 + 降对比度，避免和数值抢注意力 ----
+    Gui, WindowMenu:Font, s8 c8A94A6, Microsoft YaHei
+    Gui, WindowMenu:Add, Text, x14 y8 w140 Center, 透明度
+    Gui, WindowMenu:Add, Text, x216 y8 w122 Center, 触发区域
+    Gui, WindowMenu:Add, Text, x358 y8 w104 Center, 绑定
+    Gui, WindowMenu:Add, Text, x482 y8 w70, 窗口大小
+
+    ; ---- 第二级：交互控件 ----
     Gui, WindowMenu:Font, s9 cFFFFFF, Microsoft YaHei
-    Gui, WindowMenu:Add, Text, x12 y6 w180 Center, 透明度
-    Gui, WindowMenu:Add, Text, x205 y6 w44 Center, 迷彩
-    Gui, WindowMenu:Add, Text, x270 y6 w104 Center, 触发区域
-    Gui, WindowMenu:Add, Text, x417 y6 w44 Center, 置顶
-    Gui, WindowMenu:Add, Text, x478 y6 w92 Center, 绑定
-    Gui, WindowMenu:Add, Slider, x16 y29 w140 h28 Range5-100 ToolTip vUI_WindowOpacity gWindowMenuOpacityChanged, %opacityPercent%
-    Gui, WindowMenu:Add, Text, x160 y32 w32 vWindowOpacityValue, % opacityPercent . "%"
-    camoText := state.camouflageEnabled ? "关" : "开"
-    Gui, WindowMenu:Add, Button, x208 y29 w36 h28 gWindowMenuCamouflage, %camoText%
-    Gui, WindowMenu:Add, Button, x270 y29 w32 h28 gWindowMenuTriggerSmall, S
-    Gui, WindowMenu:Add, Button, x306 y29 w32 h28 gWindowMenuTriggerMedium, M
-    Gui, WindowMenu:Add, Button, x342 y29 w32 h28 gWindowMenuTriggerLarge, L
-    Gui, WindowMenu:Add, Text, x270 y59 w104 Center cAAB7C4, % state.triggerWidth . " × " . state.triggerHeight
-    topText := state.alwaysOnTop ? "关" : "开"
-    Gui, WindowMenu:Add, Button, x421 y29 w36 h28 gWindowMenuTopmost, %topText%
+    ; 第 1 列：透明度滑块 +（下一行）两个状态开关。
+    ; 开关用 Checkbox 而非"开/关"按钮：勾选状态直接等于功能状态，不会出现"显示开、其实是关"的歧义。
+    Gui, WindowMenu:Add, Slider, x14 y28 w140 h26 Range5-100 ToolTip vUI_WindowOpacity gWindowMenuOpacityChanged, %opacityPercent%
+    Gui, WindowMenu:Add, Text, x160 y33 w36 vWindowOpacityValue, % opacityPercent . "%"
+    ; 选项串必须先拼进变量：Gui,Add 的 Options 参数中间不认 "% 表达式"，只有参数开头的 "% " 才是强制表达式
+    topOptions := state.alwaysOnTop ? "Checked" : ""
+    camoOptions := state.camouflageEnabled ? "Checked" : ""
+    Gui, WindowMenu:Add, Checkbox, x14 y61 w80 h22 vUI_WindowTopmost gWindowMenuTopmost %topOptions%, 置顶
+    Gui, WindowMenu:Add, Checkbox, x100 y61 w80 h22 vUI_WindowCamouflage gWindowMenuCamouflage %camoOptions%, 迷彩
+
+    ; 第 2 列：迷彩触发区域的三档预设尺寸
+    Gui, WindowMenu:Add, Button, x216 y28 w38 h26 gWindowMenuTriggerSmall, S
+    Gui, WindowMenu:Add, Button, x258 y28 w38 h26 gWindowMenuTriggerMedium, M
+    Gui, WindowMenu:Add, Button, x300 y28 w38 h26 gWindowMenuTriggerLarge, L
+
+    ; 第 3 列：绑定键。DropDownList 的高度由字体决定而非 h 选项，
+    ; 所以不写 h，改用 y30 让它在 y28 起的 26px 行内视觉居中。
     currentBinding := GetWindowBindingKey(hwnd)
     bindChoices := BuildBindingChoices(hwnd, occupiedKeys)
-    Gui, WindowMenu:Add, DropDownList, x476 y31 w94 vUI_WindowMenuBind gWindowMenuBindChanged, %bindChoices%
+    Gui, WindowMenu:Add, DropDownList, x358 y30 w104 vUI_WindowMenuBind gWindowMenuBindChanged, %bindChoices%
     GuiControl, WindowMenu:ChooseString, UI_WindowMenuBind, %currentBinding%
-    if (occupiedKeys != "")
-        Gui, WindowMenu:Add, Text, x476 y59 w94 Center c68707A, 已占用: %occupiedKeys%
-    Gui, WindowMenu:Add, Button, x562 y3 w22 h18 gWindowMenuClose, ×
+
+    ; 第 4 列：宽 / 高各占一行。"锁定比例"是本组的修饰项而非第三个参数，
+    ; 放标题行右侧，省掉一个只为它存在的第三行（整条因此从 140 降到 100 高）。
+    aspectOptions := state.aspectRatioLocked ? "Checked" : ""
+    Gui, WindowMenu:Add, Checkbox, x560 y6 w86 h20 vUI_WindowAspectLocked gWindowMenuAspectChanged %aspectOptions%, 锁定比例
+    Gui, WindowMenu:Add, Text, x482 y33 w20, 宽
+    Gui, WindowMenu:Add, Slider, x506 y28 w124 h26 Range1-200 ToolTip vUI_WindowWidthScale gWindowMenuResizeByWidth, 100
+    Gui, WindowMenu:Add, Text, x636 y33 w52 vWindowMenuWidthValue, % width . " px"
+    Gui, WindowMenu:Add, Text, x482 y65 w20, 高
+    Gui, WindowMenu:Add, Slider, x506 y60 w124 h26 Range1-200 ToolTip vUI_WindowHeightScale gWindowMenuResizeByHeight, 100
+    Gui, WindowMenu:Add, Text, x636 y65 w52 vWindowMenuHeightValue, % height . " px"
+
+    Gui, WindowMenu:Add, Button, x674 y6 w20 h20 gWindowMenuClose, ×
+
+    ; ---- 第三级：次要读数，比数值再弱一级 ----
+    ; 两个读数都无条件创建（哪怕内容为空），这样有无内容都不会让布局跳动，也才能用 GuiControl 增量刷新。
+    Gui, WindowMenu:Font, s8 c7A8494, Microsoft YaHei
+    Gui, WindowMenu:Add, Text, x216 y64 w122 Center vWindowMenuTriggerValue, % state.triggerWidth . " × " . state.triggerHeight
+    Gui, WindowMenu:Add, Text, x358 y64 w104 Center vWindowMenuBindHint, % occupiedKeys != "" ? "已占用 " . occupiedKeys : ""
+
     Gui, WindowMenu:Show, NoActivate x%menuX% y%menuY% w%menuWidth% h%menuHeight%
     WinSet, Transparent, 235, ahk_id %WindowMenuHwnd%
     g_WindowMenuOpen := true
 }
 
 RefreshWindowMenu() {
-    global g_WindowMenuTargetHwnd
-    if (g_WindowMenuTargetHwnd && WinExist("ahk_id " . g_WindowMenuTargetHwnd))
+    global g_WindowMenuTargetHwnd, g_WindowMenuOpen
+    ; 仅在需要重新定位整条时使用；日常状态变更请用 UpdateWindowMenu* 系列做增量刷新，
+    ; 因为重建会重新采样 resizeBaseWidth/Height，导致宽高滑块基准被打断。
+    if (g_WindowMenuOpen && g_WindowMenuTargetHwnd && WinExist("ahk_id " . g_WindowMenuTargetHwnd))
         ShowWindowMenu(g_WindowMenuTargetHwnd)
 }
 
