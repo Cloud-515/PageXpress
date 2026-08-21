@@ -590,7 +590,7 @@ EnsureWindowState(hwnd) {
     global WindowStateByHwnd
 
     if (!WindowStateByHwnd.HasKey(hwnd))
-        WindowStateByHwnd[hwnd] := {opacity: 255, alwaysOnTop: false, camouflageEnabled: false, camouflageHidden: false, triggerWidth: 240, triggerHeight: 135, x: 0, y: 0, width: 0, height: 0, triggerX: 0, triggerY: 0, hoverArmed: true, hideAt: 0, editX: 0, editY: 0, editWidth: 0, editHeight: 0, aspectRatio: 0, aspectRatioLocked: true, resizeBaseWidth: 0, resizeBaseHeight: 0, preserveSize: false, preserveWidth: 0, preserveHeight: 0, preserveLastX: 0, preserveLastY: 0, preserveHasPosition: false, preservePending: false, dragMode: "", dragStartX: 0, dragStartY: 0, dragStartLeft: 0, dragStartTop: 0, dragStartWidth: 0, dragStartHeight: 0}
+        WindowStateByHwnd[hwnd] := {opacity: 255, alwaysOnTop: false, camouflageEnabled: false, camouflageHidden: false, triggerWidth: 240, triggerHeight: 135, x: 0, y: 0, width: 0, height: 0, triggerX: 0, triggerY: 0, hoverArmed: true, hideAt: 0, editX: 0, editY: 0, editWidth: 0, editHeight: 0, aspectRatio: 0, aspectRatioLocked: true, resizeBaseWidth: 0, resizeBaseHeight: 0, preserveSize: false, preserveWidth: 0, preserveHeight: 0, preserveLastX: 0, preserveLastY: 0, preserveHasPosition: false, preservePending: false, dragMode: "", dragStartX: 0, dragStartY: 0, dragStartLeft: 0, dragStartTop: 0, dragStartWidth: 0, dragStartHeight: 0, revealTick: 0, hideTick: 0, appliedX: -99999, appliedY: -99999, appliedWidth: 0, appliedHeight: 0, regionClickThrough: -1, pinned: false}
     return WindowStateByHwnd[hwnd]
 }
 
@@ -745,7 +745,11 @@ SetWindowOpacity(hwnd, opacity) {
 
     state := EnsureWindowState(hwnd)
     state.opacity := opacity
-    WinSet, Transparent, %opacity%, ahk_id %hwnd%
+    ; 同 RevealCamouflageWindow：滑到 100% 就把层摘掉，而不是留一个"透明度 255"的 layered 窗口
+    if (opacity >= 255)
+        WinSet, Transparent, Off, ahk_id %hwnd%
+    else
+        WinSet, Transparent, %opacity%, ahk_id %hwnd%
 }
 
 SetWindowTopmost(hwnd, enabled) {
@@ -764,6 +768,10 @@ SetCamouflage(hwnd, enabled) {
         return
     state := EnsureWindowState(hwnd)
     if (!enabled) {
+        ; 取消勾选时若窗口正处于隐藏（最小化）态，必须先把它捞回来再销毁区域：
+        ; 区域一没，唯一的呼出入口也没了，窗口会以最小化状态被永久遗忘在任务栏里。
+        if (state.camouflageHidden)
+            RevealCamouflageWindow(hwnd, false)
         state.camouflageEnabled := false
         state.camouflageHidden := false
         DestroyCamouflageRegion(hwnd)
@@ -792,6 +800,11 @@ HideCamouflageWindow(hwnd) {
     state.originalX := x, state.originalY := y, state.originalWidth := w, state.originalHeight := h
     WinMinimize, ahk_id %hwnd%
     state.camouflageHidden := true
+    state.hideAt := 0
+    state.pinned := false
+    ; 记一个时间戳：隐藏/呼出都是异步生效的，SyncCamouflageHiddenState 靠它区分
+    ; "窗口真的被用户动了" 和 "我们自己刚下的命令还没落地"
+    state.hideTick := A_TickCount
 }
 
 CreateCamouflageRegion(hwnd) {
@@ -800,7 +813,13 @@ CreateCamouflageRegion(hwnd) {
     guiName := "Camouflage" . hwnd
     g_CamouflageGuiNames[hwnd] := guiName
     Gui, %guiName%:Destroy
-    Gui, %guiName%:+AlwaysOnTop -Caption +ToolWindow +E0x20 +HwndregionHwnd
+    ; -DPIScale：触发区的坐标全程来自 WinGetPos / GetCursorPos，都是物理像素。
+    ;   实测（本机 A_ScreenDPI=120，即 125%）Gui,Show 只缩放 w/h 而不缩放 x/y：
+    ;   请求 240×135 实际会建出 300×169 的窗口，靠 WinSet,Region 的物理 240×135 裁回去才看不出来。
+    ;   于是编辑态摘掉点击穿透后，右/下各有 60/34px 的隐形区域照样吃点击。
+    ; +E0x08000000（WS_EX_NOACTIVATE）：编辑态会临时摘掉点击穿透，
+    ;   没有这一位的话点中区域会把焦点从当前应用抢走。
+    Gui, %guiName%:+AlwaysOnTop -Caption +ToolWindow +E0x20 +E0x08000000 -DPIScale +HwndregionHwnd
     Gui, %guiName%:Color, 4FC3F7
     regionOptions := "NoActivate x" . state.triggerX . " y" . state.triggerY . " w" . state.triggerWidth . " h" . state.triggerHeight
     Gui, %guiName%:Show, %regionOptions%
@@ -808,15 +827,26 @@ CreateCamouflageRegion(hwnd) {
     WinSet, Transparent, 13, ahk_id %regionHwnd%
     regionSpec := "0-0 w" . state.triggerWidth . " h" . state.triggerHeight . " R8-8"
     WinSet, Region, %regionSpec%, ahk_id %regionHwnd%
+    ; 记下刚刚落地的几何与样式，作为脏检查的基线
+    state.appliedX := state.triggerX, state.appliedY := state.triggerY
+    state.appliedWidth := state.triggerWidth, state.appliedHeight := state.triggerHeight
+    state.regionClickThrough := 1
 }
 
 DestroyCamouflageRegion(hwnd) {
-    global g_CamouflageGuiNames, g_CamouflageGuiHwnds
+    global g_CamouflageGuiNames, g_CamouflageGuiHwnds, WindowStateByHwnd
     guiName := g_CamouflageGuiNames[hwnd]
     if (guiName != "")
         Gui, %guiName%:Destroy
     g_CamouflageGuiNames.Delete(hwnd)
     g_CamouflageGuiHwnds.Delete(hwnd)
+    ; 作废脏检查基线，否则下次重建区域时会被误判为"几何没变、不必下发"
+    if (WindowStateByHwnd.HasKey(hwnd)) {
+        state := WindowStateByHwnd[hwnd]
+        state.appliedX := -99999, state.appliedY := -99999
+        state.appliedWidth := 0, state.appliedHeight := 0
+        state.regionClickThrough := -1
+    }
 }
 
 UpdateCamouflageRegion(hwnd) {
@@ -825,11 +855,53 @@ UpdateCamouflageRegion(hwnd) {
     regionHwnd := g_CamouflageGuiHwnds[hwnd]
     if (!regionHwnd)
         return
+    ; 脏检查：轮询每秒会把这里叫上 33 次。位置没变就不必 WinMove；
+    ; 尺寸没变则绝不重设 Region——SetWindowRgn 是这条链路上最贵的一次调用，也是边缘闪烁的来源。
+    moved := (state.appliedX != state.triggerX || state.appliedY != state.triggerY)
+    resized := (state.appliedWidth != state.triggerWidth || state.appliedHeight != state.triggerHeight)
+    if (!moved && !resized)
+        return
     regionX := state.triggerX, regionY := state.triggerY
     regionWidth := state.triggerWidth, regionHeight := state.triggerHeight
     WinMove, ahk_id %regionHwnd%,, %regionX%, %regionY%, %regionWidth%, %regionHeight%
-    regionSpec := "0-0 w" . regionWidth . " h" . regionHeight . " R8-8"
-    WinSet, Region, %regionSpec%, ahk_id %regionHwnd%
+    if (resized) {
+        regionSpec := "0-0 w" . regionWidth . " h" . regionHeight . " R8-8"
+        WinSet, Region, %regionSpec%, ahk_id %regionHwnd%
+    }
+    state.appliedX := regionX, state.appliedY := regionY
+    state.appliedWidth := regionWidth, state.appliedHeight := regionHeight
+}
+
+; 点击穿透（WS_EX_TRANSPARENT）只在状态翻转时写一次。
+; 此前是每 tick 无条件 WinSet 一次 ExStyle，纯属白烧。
+SetCamouflageRegionClickThrough(hwnd, state, enabled) {
+    global g_CamouflageGuiHwnds
+    if (state.regionClickThrough = enabled)
+        return
+    regionHwnd := g_CamouflageGuiHwnds[hwnd]
+    if (!regionHwnd)
+        return
+    if (enabled)
+        WinSet, ExStyle, +0x20, ahk_id %regionHwnd%
+    else
+        WinSet, ExStyle, -0x20, ahk_id %regionHwnd%
+    state.regionClickThrough := enabled
+}
+
+; 把 camouflageHidden 拨回窗口的真实最小化状态。
+; 用户自己点最小化按钮、或从任务栏把窗口捞回来时，标志会和现实脱节：
+; 标志说"显示中"而窗口其实已最小化时，呼出分支进不去、隐藏分支又不超时，这个触发区就彻底失灵。
+; 200ms 宽限期留给 WinMinimize / WinRestore 的动画，免得和我们自己刚下的命令抢状态。
+SyncCamouflageHiddenState(hwnd, state) {
+    WinGet, minMax, MinMax, ahk_id %hwnd%
+    if (minMax = -1) {
+        if (!state.camouflageHidden && A_TickCount - state.revealTick > 200) {
+            state.camouflageHidden := true
+            state.hideAt := 0
+        }
+    } else if (state.camouflageHidden && A_TickCount - state.hideTick > 200) {
+        state.camouflageHidden := false
+    }
 }
 
 IsCamouflageEditKeyDown() {
@@ -918,10 +990,18 @@ RevealCamouflageWindow(hwnd, activate := false) {
         return
     WinRestore, ahk_id %hwnd%
     opacity := state.opacity
-    WinSet, Transparent, %opacity%, ahk_id %hwnd%
+    ; 全不透明时用 Off 彻底摘掉 WS_EX_LAYERED：留着层会让 Chromium 系窗口掉帧
+    if (opacity >= 255)
+        WinSet, Transparent, Off, ahk_id %hwnd%
+    else
+        WinSet, Transparent, %opacity%, ahk_id %hwnd%
     if (state.alwaysOnTop)
         WinSet, AlwaysOnTop, On, ahk_id %hwnd%
     state.camouflageHidden := false
+    state.hideAt := 0
+    state.revealTick := A_TickCount
+    ; 每次呼出都从"未钉住"开始：是否留下由用户接下来有没有真交互决定
+    state.pinned := false
     if (state.preserveSize)
         state.preservePending := true
     if (activate)
@@ -932,9 +1012,12 @@ CheckCamouflageWindows() {
     global WindowStateByHwnd, g_CamouflageGuiHwnds, g_RadialPreviewHwnd
 
     GetCursorScreenPos(mouseX, mouseY)
+    foregroundHwnd := DllCall("GetForegroundWindow", "Ptr")
+    ; 遍历中不能直接删键：先收集，循环结束后统一清理
+    staleHwnds := []
     for hwnd, state in WindowStateByHwnd {
         if (!WinExist("ahk_id " . hwnd)) {
-            WindowStateByHwnd.Delete(hwnd)
+            staleHwnds.Push(hwnd)
             continue
         }
         if (hwnd = g_RadialPreviewHwnd) {
@@ -942,39 +1025,54 @@ CheckCamouflageWindows() {
             continue
         }
         PreserveTargetWindowSize(hwnd)
+        ; 没启用迷彩的窗口（只是开过控制条）到此为止：
+        ; 它的 triggerX/Y 还是 0，再往下算命中测试纯属浪费
+        if (!state.camouflageEnabled) {
+            state.hideAt := 0
+            continue
+        }
+        SyncCamouflageHiddenState(hwnd, state)
         insideTrigger := mouseX >= state.triggerX && mouseX <= state.triggerX + state.triggerWidth && mouseY >= state.triggerY && mouseY <= state.triggerY + state.triggerHeight
-        if (state.camouflageEnabled && !state.camouflageHidden)
+        if (!state.camouflageHidden)
             UpdateCamouflageTrigger(hwnd)
-        if (state.camouflageEnabled && IsCamouflageEditKeyDown()) {
-            regionHwnd := g_CamouflageGuiHwnds[hwnd]
-            if (regionHwnd)
-                WinSet, ExStyle, -0x20, ahk_id %regionHwnd%
+        if (IsCamouflageEditKeyDown()) {
+            SetCamouflageRegionClickThrough(hwnd, state, false)
             if (!state.dragMode && GetKeyState("LButton", "P") && insideTrigger)
                 CamouflageRegionMouseDown(hwnd, mouseX, mouseY)
             continue
         }
-        regionHwnd := g_CamouflageGuiHwnds[hwnd]
-        if (regionHwnd)
-            WinSet, ExStyle, +0x20, ahk_id %regionHwnd%
+        SetCamouflageRegionClickThrough(hwnd, state, true)
         if (state.camouflageHidden && insideTrigger) {
             RevealCamouflageWindow(hwnd, true)
-            state.hideAt := 0
-        } else if (state.camouflageEnabled && !state.camouflageHidden) {
+        } else if (!state.camouflageHidden) {
             WinGetPos, wx, wy, ww, wh, ahk_id %hwnd%
             insideWindow := mouseX >= wx - 8 && mouseX <= wx + ww + 8 && mouseY >= wy - 8 && mouseY <= wy + wh + 8
             insideMenu := IsWindowMenuUnderCursor(hwnd, mouseX, mouseY)
-            if (!insideTrigger && !insideWindow && !insideMenu) {
+            hasFocus := (foregroundHwnd = hwnd)
+            ; 呼出时我们会顺手 WinActivate，所以"是前台"并不等于"用户在用它"：
+            ; 若前台就无条件保活，悬停扫一眼的窗口移开鼠标后会永远赖在屏幕上。
+            ; 只有真正交互过才钉住——在窗口里点过，或正往里打字。
+            ; （A_TimeIdleKeyboard 是纯键盘空闲、不被鼠标移动污染，前提是键盘钩子已装；
+            ;   本脚本的 $ 前缀热键强制装了钩子，见文件顶部 Hotkey 注册段。）
+            if (hasFocus && ((insideWindow && GetKeyState("LButton", "P")) || A_TimeIdleKeyboard < 1000))
+                state.pinned := true
+            ; 钉住之后按"失去焦点 + 鼠标离开"才隐藏——手离开鼠标、把光标甩到别的屏都不该让窗口溜走
+            keepAlive := insideTrigger || insideWindow || insideMenu || (state.pinned && hasFocus)
+            if (!keepAlive) {
                 if (!state.hideAt)
                     state.hideAt := A_TickCount + g_CamouflageHideDelay
-                else if (A_TickCount >= state.hideAt) {
-                    state.camouflageHidden := true
-                    state.hideAt := 0
-                    WinMinimize, ahk_id %hwnd%
-                }
+                else if (A_TickCount >= state.hideAt)
+                    HideCamouflageWindow(hwnd)
             } else {
                 state.hideAt := 0
             }
         }
+    }
+    ; 目标窗口已关闭：区域 GUI 必须跟着销毁。只删 state 的话，屏幕上会留下一块
+    ; 谁都点不动、也再没人负责回收的半透明矩形（认领它的那条 state 已经没了）
+    for index, staleHwnd in staleHwnds {
+        DestroyCamouflageRegion(staleHwnd)
+        WindowStateByHwnd.Delete(staleHwnd)
     }
     global g_WindowMenuOpen, g_WindowMenuTargetHwnd
     if (g_WindowMenuOpen && g_WindowMenuTargetHwnd) {
@@ -1013,7 +1111,10 @@ IsWindowMenuUnderCursor(hwnd, mouseX, mouseY) {
 ;   3. 字体分三级依次落笔：标题 s8 暗 → 控件 s9 白 → 次要读数 s8 更暗。
 ;      AHK v1 的 Gui,Font 是"当前状态"，后续 Add 全部继承，所以顺序不能打乱。
 ;
-; 注：坐标是逻辑像素，AHK v1 默认按系统 DPI 缩放（125% 下整条实际 880 物理像素宽）。
+; 注：布局坐标是逻辑像素。AHK v1 的 Gui,Show 只把 w/h 按系统 DPI 缩放，**不**缩放 x/y
+;     （实测 125%：请求 x1000 y500 w704 h100，实际得到 1000,500 880×125）。
+;     所以 w/h 继续给逻辑值交给 AHK 缩放，而一切定位数学（居中、翻转、工作区钳制）
+;     必须用 menuPhysicalWidth/Height 这对物理尺寸来算——它们和 WinGetPos/SysGet 同一坐标系。
 ; -------------------------------------------------------
 ShowWindowMenu(hwnd) {
     global g_WindowMenuOpen, g_WindowMenuHwnd, UI_WindowOpacity, UI_WindowMenuBind, UI_WindowWidthScale, UI_WindowHeightScale, UI_WindowAspectLocked, UI_WindowTopmost, UI_WindowCamouflage, WindowOpacityValue, WindowMenuWidthValue, WindowMenuHeightValue, WindowMenuTriggerValue, WindowMenuBindHint
@@ -1028,10 +1129,14 @@ ShowWindowMenu(hwnd) {
     if (state.aspectRatioLocked)
         state.aspectRatio := width / height
     menuWidth := 704, menuHeight := 100
+    ; 整条落到屏幕上的真实尺寸（125% 下是 880×125）。此前定位数学直接用 704×100，
+    ; 于是整条比目标窗口中心右偏 88px、底边压住目标顶部 17px，钳制也漏掉右/下各 176/25px。
+    menuPhysicalWidth := Round(menuWidth * A_ScreenDPI / 96)
+    menuPhysicalHeight := Round(menuHeight * A_ScreenDPI / 96)
     opacityPercent := Round(state.opacity / 2.55)
     ; 默认贴在目标窗口正上方居中
-    menuX := x + Round((width - menuWidth) / 2)
-    menuY := y - menuHeight - 8
+    menuX := x + Round((width - menuPhysicalWidth) / 2)
+    menuY := y - menuPhysicalHeight - 8
 
     ; 顶部空间不够时翻到窗口下方，再整体收进工作区，避免整条被屏幕边缘截断
     SysGet, targetMonitor, Monitor, ahk_id %hwnd%
@@ -1042,8 +1147,8 @@ ShowWindowMenu(hwnd) {
     workBottom := workAreaBottom
     if (menuY < workTop)
         menuY := y + height + 8
-    menuX := Max(workLeft, Min(menuX, workRight - menuWidth))
-    menuY := Max(workTop, Min(menuY, workBottom - menuHeight))
+    menuX := Max(workLeft, Min(menuX, workRight - menuPhysicalWidth))
+    menuY := Max(workTop, Min(menuY, workBottom - menuPhysicalHeight))
     Gui, WindowMenu:+AlwaysOnTop -Caption +ToolWindow +HwndWindowMenuHwnd
     g_WindowMenuHwnd := WindowMenuHwnd
     Gui, WindowMenu:Color, 202833
