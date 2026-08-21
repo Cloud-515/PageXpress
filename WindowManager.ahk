@@ -82,6 +82,15 @@ global g_WindowMenuTargetHwnd := 0
 global g_WindowMenuOpen := false
 global g_WindowMenuHwnd := 0
 global g_CamouflageHideDelay := 250
+; 控制条与目标窗口之间留的视觉缝隙（物理像素），同时是一条坐标契约：
+; 这条缝隙既不在窗口矩形里、也不在整条矩形里，而鼠标从窗口挪向整条必然要穿过它，
+; 所以命中测试必须把缝隙当"过道"一起算进保活区，详见 IsPointInMenuHoverArea。
+global g_WindowMenuGap := 8
+; 命中测试的额外容差：窗口边框和 DPI 取整会让 WinGetPos 的矩形跟视觉边缘差几像素
+global g_WindowMenuHoverPad := 6
+; 和迷彩同款宽限期：单帧的坐标抖动不该直接把整条收掉
+global g_WindowMenuHideDelay := 250
+global g_WindowMenuHideAt := 0
 global g_CamouflageEditKey := CamouflageEditKey
 global g_CamouflageGuiNames := {}
 global g_CamouflageGuiHwnds := {}
@@ -1047,7 +1056,7 @@ CheckCamouflageWindows() {
         } else if (!state.camouflageHidden) {
             WinGetPos, wx, wy, ww, wh, ahk_id %hwnd%
             insideWindow := mouseX >= wx - 8 && mouseX <= wx + ww + 8 && mouseY >= wy - 8 && mouseY <= wy + wh + 8
-            insideMenu := IsWindowMenuUnderCursor(hwnd, mouseX, mouseY)
+            insideMenu := IsWindowMenuHoverArea(hwnd, mouseX, mouseY)
             hasFocus := (foregroundHwnd = hwnd)
             ; 呼出时我们会顺手 WinActivate，所以"是前台"并不等于"用户在用它"：
             ; 若前台就无条件保活，悬停扫一眼的窗口移开鼠标后会永远赖在屏幕上。
@@ -1074,22 +1083,60 @@ CheckCamouflageWindows() {
         DestroyCamouflageRegion(staleHwnd)
         WindowStateByHwnd.Delete(staleHwnd)
     }
-    global g_WindowMenuOpen, g_WindowMenuTargetHwnd
+    global g_WindowMenuOpen, g_WindowMenuTargetHwnd, g_WindowMenuHideAt, g_WindowMenuHideDelay
     if (g_WindowMenuOpen && g_WindowMenuTargetHwnd) {
         menuTarget := g_WindowMenuTargetHwnd
-        WinGetPos, targetX, targetY, targetW, targetH, ahk_id %menuTarget%
-        overTarget := mouseX >= targetX && mouseX <= targetX + targetW && mouseY >= targetY && mouseY <= targetY + targetH
-        if (!overTarget && !IsWindowMenuUnderCursor(menuTarget, mouseX, mouseY))
+        if (!WinExist("ahk_id " . menuTarget)) {
+            ; 目标窗口没了就没什么可控的了，不必等宽限期
             DestroyWindowMenu()
+        } else {
+            WinGetPos, targetX, targetY, targetW, targetH, ahk_id %menuTarget%
+            overTarget := mouseX >= targetX && mouseX <= targetX + targetW && mouseY >= targetY && mouseY <= targetY + targetH
+            if (overTarget || IsWindowMenuHoverArea(menuTarget, mouseX, mouseY)) {
+                g_WindowMenuHideAt := 0
+            } else if (!g_WindowMenuHideAt) {
+                ; 过道之外还会有别的空档：整条比窗口窄时窗口顶边两侧、被钳制到别处时的斜向路径，
+                ; 以及 30ms 轮询本身会漏采样的快速移动。先记截止时间，别在第一帧就收掉。
+                g_WindowMenuHideAt := A_TickCount + g_WindowMenuHideDelay
+            } else if (A_TickCount >= g_WindowMenuHideAt) {
+                DestroyWindowMenu()
+            }
+        }
     }
 }
 
-IsWindowMenuUnderCursor(hwnd, mouseX, mouseY) {
-    global g_WindowMenuOpen, g_WindowMenuTargetHwnd, g_WindowMenuHwnd
+; 鼠标是否停在"控制条本体，或窗口通往控制条的那条过道"上。
+;
+; 为什么要有过道：ShowWindowMenu 故意让整条和目标窗口之间留 g_WindowMenuGap 的缝隙。
+; 这条缝隙不属于任何一个矩形，只测两个矩形的话，鼠标从窗口移向整条的途中必然有几帧
+; 落在缝隙上，于是被判成"离开窗口"，整条（连带迷彩窗口）在半路就被收掉。
+;
+; 过道的竖直范围由两个矩形的实际位置算出，而不是照抄 g_WindowMenuGap——
+; 整条被工作区钳制（见 ShowWindowMenu 末尾的 Max/Min）之后真实间距未必还是 8。
+; 横向放宽到两者的并集包围盒：过道只有缝隙那么高（常态 8px），横向放宽不会让整条误留，
+; 而整条比窗口宽时（704 逻辑像素，125% 下 880），斜着走进两侧凸出部分只能靠它接住。
+;
+; 纯几何、不碰全局，因此这份源码在 AHK v1 / v2 下都能直接跑，便于单独验证。
+IsPointInMenuHoverArea(px, py, tx, ty, tw, th, mx, my, mw, mh, pad) {
+    if (px >= mx - pad && px <= mx + mw + pad && py >= my - pad && py <= my + mh + pad)
+        return true
+    if (px < Min(tx, mx) - pad || px > Max(tx + tw, mx + mw) + pad)
+        return false
+    ; 两个矩形竖直方向有重叠时 corridorTop > corridorBottom，这个区间自然为空
+    corridorTop := Min(ty + th, my + mh)
+    corridorBottom := Max(ty, my)
+    return py >= corridorTop && py <= corridorBottom
+}
+
+IsWindowMenuHoverArea(hwnd, mouseX, mouseY) {
+    global g_WindowMenuOpen, g_WindowMenuTargetHwnd, g_WindowMenuHwnd, g_WindowMenuHoverPad
     if (!g_WindowMenuOpen || g_WindowMenuTargetHwnd != hwnd || !g_WindowMenuHwnd)
         return false
+    if (!WinExist("ahk_id " . hwnd))
+        return false
+    WinGetPos, targetX, targetY, targetW, targetH, ahk_id %hwnd%
     WinGetPos, menuX, menuY, menuWidth, menuHeight, ahk_id %g_WindowMenuHwnd%
-    return mouseX >= menuX && mouseX <= menuX + menuWidth && mouseY >= menuY && mouseY <= menuY + menuHeight
+    return IsPointInMenuHoverArea(mouseX, mouseY, targetX, targetY, targetW, targetH, menuX, menuY, menuWidth, menuHeight, g_WindowMenuHoverPad)
 }
 
 ; -------------------------------------------------------
@@ -1111,13 +1158,17 @@ IsWindowMenuUnderCursor(hwnd, mouseX, mouseY) {
 ;   3. 字体分三级依次落笔：标题 s8 暗 → 控件 s9 白 → 次要读数 s8 更暗。
 ;      AHK v1 的 Gui,Font 是"当前状态"，后续 Add 全部继承，所以顺序不能打乱。
 ;
+; 整条与目标窗口之间的缝隙统一走 g_WindowMenuGap，不要在这里写字面量：
+; 缝隙同时被鼠标保活的命中测试消费（过道，见 IsPointInMenuHoverArea），
+; 两边各写一个数字的话，缝隙一变宽就又会出现"移向整条的半路整条自己消失"。
+;
 ; 注：布局坐标是逻辑像素。AHK v1 的 Gui,Show 只把 w/h 按系统 DPI 缩放，**不**缩放 x/y
 ;     （实测 125%：请求 x1000 y500 w704 h100，实际得到 1000,500 880×125）。
 ;     所以 w/h 继续给逻辑值交给 AHK 缩放，而一切定位数学（居中、翻转、工作区钳制）
 ;     必须用 menuPhysicalWidth/Height 这对物理尺寸来算——它们和 WinGetPos/SysGet 同一坐标系。
 ; -------------------------------------------------------
 ShowWindowMenu(hwnd) {
-    global g_WindowMenuOpen, g_WindowMenuHwnd, UI_WindowOpacity, UI_WindowMenuBind, UI_WindowWidthScale, UI_WindowHeightScale, UI_WindowAspectLocked, UI_WindowTopmost, UI_WindowCamouflage, WindowOpacityValue, WindowMenuWidthValue, WindowMenuHeightValue, WindowMenuTriggerValue, WindowMenuBindHint
+    global g_WindowMenuOpen, g_WindowMenuHwnd, g_WindowMenuGap, UI_WindowOpacity, UI_WindowMenuBind, UI_WindowWidthScale, UI_WindowHeightScale, UI_WindowAspectLocked, UI_WindowTopmost, UI_WindowCamouflage, WindowOpacityValue, WindowMenuWidthValue, WindowMenuHeightValue, WindowMenuTriggerValue, WindowMenuBindHint
 
     DestroyWindowMenu()
     state := EnsureWindowState(hwnd)
@@ -1136,7 +1187,7 @@ ShowWindowMenu(hwnd) {
     opacityPercent := Round(state.opacity / 2.55)
     ; 默认贴在目标窗口正上方居中
     menuX := x + Round((width - menuPhysicalWidth) / 2)
-    menuY := y - menuPhysicalHeight - 8
+    menuY := y - menuPhysicalHeight - g_WindowMenuGap
 
     ; 顶部空间不够时翻到窗口下方，再整体收进工作区，避免整条被屏幕边缘截断
     SysGet, targetMonitor, Monitor, ahk_id %hwnd%
@@ -1146,7 +1197,7 @@ ShowWindowMenu(hwnd) {
     workRight := workAreaRight
     workBottom := workAreaBottom
     if (menuY < workTop)
-        menuY := y + height + 8
+        menuY := y + height + g_WindowMenuGap
     menuX := Max(workLeft, Min(menuX, workRight - menuPhysicalWidth))
     menuY := Max(workTop, Min(menuY, workBottom - menuPhysicalHeight))
     Gui, WindowMenu:+AlwaysOnTop -Caption +ToolWindow +HwndWindowMenuHwnd
@@ -1221,10 +1272,12 @@ RefreshWindowMenu() {
 }
 
 DestroyWindowMenu() {
-    global g_WindowMenuOpen, g_WindowMenuHwnd
+    global g_WindowMenuOpen, g_WindowMenuHwnd, g_WindowMenuHideAt
     Gui, WindowMenu:Destroy
     g_WindowMenuOpen := false
     g_WindowMenuHwnd := 0
+    ; 清掉待收计时，否则下次呼出会继承上一次的截止时间，刚弹出就被收掉
+    g_WindowMenuHideAt := 0
 }
 
 IsScriptGui(hwnd) {
