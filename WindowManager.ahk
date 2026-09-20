@@ -41,6 +41,12 @@ IniRead, RadialSize, %IniFile%, RadialMenu, Size, 220
 IniRead, RadialNormalColor, %IniFile%, RadialMenu, NormalColor, 3A4658
 IniRead, RadialSelectedColor, %IniFile%, RadialMenu, SelectedColor, 4FC3F7
 IniRead, RadialCenterColor, %IniFile%, RadialMenu, CenterColor, 202833
+IniRead, RadialStyle, %IniFile%, RadialMenu, Style, Band
+IniRead, BandInnerRatio, %IniFile%, RadialMenu, BandInnerRatio, 0.72
+IniRead, BandOuterRatio, %IniFile%, RadialMenu, BandOuterRatio, 0.96
+IniRead, ShowIcons, %IniFile%, RadialMenu, ShowIcons, 1
+IniRead, ShowKeyBadges, %IniFile%, RadialMenu, ShowKeyBadges, 1
+IniRead, LabelMode, %IniFile%, RadialMenu, LabelMode, Always
 IniRead, WindowMenuHotkey, %IniFile%, Hotkeys, WindowMenuHotkey, %DefaultWindowMenuHotkey%
 IniRead, CamouflageEditKey, %IniFile%, Hotkeys, CamouflageEditKey, %DefaultCamouflageEditKey%
 IniRead, ConfigHotkey, %IniFile%, Hotkeys, ConfigHotkey, %DefaultConfigHotkey%
@@ -91,8 +97,31 @@ global g_RadialOffsetX := RadialOffsetX + 0
 global g_RadialOffsetY := RadialOffsetY + 0
 global g_RadialOuterRadius := Max(120, RadialSize + 0)
 global g_RadialInnerRadius := Round(g_RadialOuterRadius * 0.645)
-global g_RadialPreviewWidth := Round(g_RadialOuterRadius * 1.18)
-global g_RadialPreviewHeight := Round(g_RadialOuterRadius * 0.4)
+; -------------------------------------------------------
+; 轮盘外观（阶段 0：薄环带 + 扇区内图标/角标 + 圆形中心舱）
+;
+; 核心设计决定：**视觉环带与命中区故意解耦**。
+;   命中区仍用 g_RadialInnerRadius ~ g_RadialOuterRadius 这一整圈（内径 0.645R），
+;   因为视觉变细不等于要用户瞄得更准 —— 鼠标只要落在扇区方向上就该选中。
+;   视觉只画 g_RadialBandInner ~ g_RadialBandOuter 这条薄带，看起来轻得多。
+; 环带两端做圆头端帽（见 BuildArcBandPoints）：相邻扇区之间就是"设计过的缺口"，
+; 而不是切歪的直角。
+; -------------------------------------------------------
+global g_RadialStyle := (RadialStyle = "Wedge") ? "Wedge" : "Band"
+global g_RadialBandInnerRatio := (BandInnerRatio + 0 >= 0.3 && BandInnerRatio + 0 <= 0.95) ? BandInnerRatio + 0 : 0.72
+global g_RadialBandOuterRatio := (BandOuterRatio + 0 > g_RadialBandInnerRatio && BandOuterRatio + 0 <= 1.0) ? BandOuterRatio + 0 : 0.96
+global g_RadialBandInner := Round(g_RadialOuterRadius * g_RadialBandInnerRatio)
+global g_RadialBandOuter := Round(g_RadialOuterRadius * g_RadialBandOuterRatio)
+global g_RadialBandMid := Round((g_RadialBandInner + g_RadialBandOuter) / 2)
+global g_RadialBandThickness := g_RadialBandOuter - g_RadialBandInner
+global g_RadialShowIcons := (ShowIcons + 0) ? true : false
+global g_RadialShowBadges := (ShowKeyBadges + 0) ? true : false
+global g_RadialLabelMode := (LabelMode = "Never" || LabelMode = "Hover") ? LabelMode : "Always"
+; 中心舱：圆形。直径按"屏幕上不超过内径的 88%"反推 —— 环带是物理像素（Region 不缩放），
+; 而中心舱是 DPI 缩放的窗口，所以这里要先把物理目标算出来，再折回逻辑尺寸交给 AHK 放大，
+; 否则 125% 下这个圆会胀到压住环带。内容排版则按逻辑尺寸设计，整体等比放大。
+global g_RadialHubPhysicalDiameter := Round(g_RadialInnerRadius * 2 * 0.88)
+global g_RadialHubDiameter := Round(g_RadialHubPhysicalDiameter * 96 / A_ScreenDPI)
 global g_RadialNormalColor := NormalizeColor(RadialNormalColor, "3A4658")
 global g_RadialSelectedColor := NormalizeColor(RadialSelectedColor, "4FC3F7")
 global g_RadialCenterColor := NormalizeColor(RadialCenterColor, "202833")
@@ -103,6 +132,12 @@ global g_RadialSectorHwnds := []
 global g_RadialSectorLabelHwnds := []
 global g_RadialSectorIconHwnds := []
 global g_RadialLabelGuiNames := []
+; 标签窗口本身的句柄（g_RadialSectorLabelHwnds 存的是标签里那个 Text 控件，别混用），
+; LabelMode=Hover 时要靠它整窗显示/隐藏
+global g_RadialLabelWinHwnds := []
+; 扇区内部的图标与键位角标控件
+global g_RadialBandIconHwnds := []
+global g_RadialBandBadgeHwnds := []
 global g_RadialAppControlHwnd := 0
 global g_RadialCenterControlHwnd := 0
 global g_RadialIconControlHwnd := 0
@@ -1651,18 +1686,22 @@ CollectRadialItems() {
 
 ShowRadialMenu() {
     global g_RadialItems, g_RadialCenterX, g_RadialCenterY, g_RadialOuterRadius
-    global g_RadialInnerRadius, g_RadialPreviewWidth, g_RadialPreviewHeight, g_RadialGapDegrees, g_RadialMenuPadding
+    global g_RadialInnerRadius, g_RadialHubDiameter, g_RadialHubPhysicalDiameter, g_RadialGapDegrees, g_RadialMenuPadding
     global g_RadialNormalColor, g_RadialHwnd, g_RadialSectorHwnds
     global g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds
     global g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
     global RadialAppControlHwnd, RadialCenterControlHwnd, RadialIconControlHwnd
-    global g_RadialHighlighted
+    global g_RadialHighlighted, g_RadialLabelMode
+    global g_RadialLabelWinHwnds, g_RadialBandIconHwnds, g_RadialBandBadgeHwnds
 
     DestroyRadialMenu()
     g_RadialSectorHwnds := []
     g_RadialSectorLabelHwnds := []
     g_RadialSectorIconHwnds := []
     g_RadialLabelGuiNames := []
+    g_RadialLabelWinHwnds := []
+    g_RadialBandIconHwnds := []
+    g_RadialBandBadgeHwnds := []
     ; 扇区全部以普通色新建，所以此刻没有任何扇区处于高亮态
     g_RadialHighlighted := 0
     diameter := (g_RadialOuterRadius + g_RadialMenuPadding) * 2
@@ -1679,36 +1718,42 @@ ShowRadialMenu() {
         CreateRadialSector(sectorIndex, menuX, menuY, diameter, center, startAngle, sweepAngle, g_RadialNormalColor)
     }
 
-    ; 中心预览框的定位同样要用物理尺寸：AHK 只把 w/h 按 DPI 放大，x/y 原样传下去，
-    ; 所以"居中"必须拿放大后的尺寸算，否则框心会偏离 g_RadialCenterX/Y。
-    ; Region 也是物理像素，一并按物理尺寸裁，框内的控件（会被放大）才不会被裁掉一角。
-    previewPhysicalWidth := Round(g_RadialPreviewWidth * A_ScreenDPI / 96)
-    previewPhysicalHeight := Round(g_RadialPreviewHeight * A_ScreenDPI / 96)
-    centerX := g_RadialCenterX - Floor(previewPhysicalWidth / 2)
-    centerY := g_RadialCenterY - Floor(previewPhysicalHeight / 2)
+    ; ---- 中心舱：圆形，物理直径不超过内径的 88%（保证不压到环带）----
+    ; 定位按物理尺寸算：AHK 只把 w/h 按 DPI 放大，x/y 原样传下去
+    hubPhysicalSize := g_RadialHubPhysicalDiameter
+    centerX := g_RadialCenterX - Floor(hubPhysicalSize / 2)
+    centerY := g_RadialCenterY - Floor(hubPhysicalSize / 2)
     Gui, RadialCenter:Destroy
     Gui, RadialCenter:+AlwaysOnTop -Caption +ToolWindow +LastFound +E0x20
     g_RadialHwnd := WinExist()
-    iconY := 8
-    appTextX := 34
-    appTextWidth := g_RadialPreviewWidth - appTextX - 5
-    titleY := 39
-    titleHeight := g_RadialPreviewHeight - titleY - 5
-    titleWidth := g_RadialPreviewWidth - 10
+    ; 圆舱内的排版按逻辑坐标设计（AHK 会把控件一起缩放，所以整体等比）：
+    ; 直径 g_RadialHubDiameter 的圆，圆心在正中；下面每个控件的 y 都留了圆形的收边余量，
+    ; 越靠下可用宽度越窄，所以标题止步于 y126+44 处
+    hubTextX := Round(g_RadialHubDiameter * 0.07)
+    hubTextWidth := g_RadialHubDiameter - hubTextX * 2
+    hubIconSize := Round(g_RadialHubDiameter * 0.115)
+    hubIconX := Round(g_RadialHubDiameter / 2 - hubIconSize / 2)
+    hubIconY := Round(g_RadialHubDiameter * 0.22)
+    hubAppY := Round(g_RadialHubDiameter * 0.36)
+    hubTitleY := Round(g_RadialHubDiameter * 0.45)
+    hubTitleHeight := Round(g_RadialHubDiameter * 0.16)
     Gui, RadialCenter:Color, %g_RadialCenterColor%
-    Gui, RadialCenter:Add, Picture, x5 y%iconY% w24 h24 hwndRadialIconControlHwnd
-    Gui, RadialCenter:Font, s10 cFFFFFF w700, Microsoft YaHei
-    Gui, RadialCenter:Add, Text, x%appTextX% y5 w%appTextWidth% h30 Left +0x200 hwndRadialAppControlHwnd, 移动鼠标选择窗口
+    Gui, RadialCenter:Add, Picture, x%hubIconX% y%hubIconY% w%hubIconSize% h%hubIconSize% hwndRadialIconControlHwnd
+    Gui, RadialCenter:Font, s11 cFFFFFF w700, Microsoft YaHei
+    Gui, RadialCenter:Add, Text, x%hubTextX% y%hubAppY% w%hubTextWidth% Center +0x200 hwndRadialAppControlHwnd, 移动鼠标选择窗口
     Gui, RadialCenter:Font, s9 cD8DEE9, Microsoft YaHei
-    Gui, RadialCenter:Add, Text, x5 y%titleY% w%titleWidth% h%titleHeight% Left hwndRadialCenterControlHwnd,
+    Gui, RadialCenter:Add, Text, x%hubTextX% y%hubTitleY% w%hubTextWidth% h%hubTitleHeight% Center hwndRadialCenterControlHwnd,
     g_RadialIconControlHwnd := RadialIconControlHwnd
     g_RadialAppControlHwnd := RadialAppControlHwnd
     g_RadialCenterControlHwnd := RadialCenterControlHwnd
     GuiControl, RadialCenter:Hide, %g_RadialIconControlHwnd%
-    Gui, RadialCenter:Show, NoActivate x%centerX% y%centerY% w%g_RadialPreviewWidth% h%g_RadialPreviewHeight%
-    WinSet, Region, 0-0 w%previewPhysicalWidth% h%previewPhysicalHeight% R8-8, ahk_id %g_RadialHwnd%
+    Gui, RadialCenter:Show, NoActivate x%centerX% y%centerY% w%g_RadialHubDiameter% h%g_RadialHubDiameter%
+    ; E = 椭圆：中心舱是圆的，和环形轮盘才是一套视觉语言
+    WinSet, Region, 0-0 w%hubPhysicalSize% h%hubPhysicalSize% E, ahk_id %g_RadialHwnd%
     WinSet, Transparent, 245, ahk_id %g_RadialHwnd%
 
+    if (g_RadialLabelMode = "Never")
+        return
     Loop, %itemCount% {
         sectorIndex := A_Index
         startAngle := -90 + (sectorIndex - 1) * angleStep + g_RadialGapDegrees / 2
@@ -1719,23 +1764,62 @@ ShowRadialMenu() {
 
 CreateRadialSector(index, menuX, menuY, diameter, center, startAngle, sweepAngle, color) {
     global g_RadialOuterRadius, g_RadialInnerRadius, g_RadialSectorHwnds
-    global g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds, g_RadialItems
+    global g_RadialItems, g_RadialStyle, g_RadialBandInner, g_RadialBandOuter
+    global g_RadialBandMid, g_RadialBandThickness, g_RadialShowIcons, g_RadialShowBadges
+    global g_RadialBandIconHwnds, g_RadialBandBadgeHwnds
 
     guiName := "RadialSector" . index
     Gui, %guiName%:Destroy
-    Gui, %guiName%:+AlwaysOnTop -Caption +ToolWindow +LastFound +E0x20
+    ; -DPIScale 是必须的，理由和迷彩触发区一样、但这里更要紧：
+    ;   Region 用的是物理像素（SetWindowRgn 不做 DPI 换算），而 AHK 默认会把控件的
+    ;   坐标/尺寸按 DPI 放大。两者混在一起，125% 下扇区里的图标会被推到环带外面、再被
+    ;   Region 裁掉。关掉缩放后窗口、Region、子控件全在同一坐标系（物理像素）里。
+    ;   环带本身的视觉大小不变：Region 一直是物理的，原来那个 1.25 倍的窗口只是多余的外壳。
+    Gui, %guiName%:+AlwaysOnTop -Caption +ToolWindow +LastFound +E0x20 -DPIScale
     sectorHwnd := WinExist()
     Gui, %guiName%:Color, %color%
     Gui, %guiName%:Show, NoActivate x%menuX% y%menuY% w%diameter% h%diameter%
 
-    points := BuildAnnularSectorPoints(center, g_RadialOuterRadius, g_RadialInnerRadius, startAngle, sweepAngle)
+    if (g_RadialStyle = "Wedge")
+        points := BuildAnnularSectorPoints(center, g_RadialOuterRadius, g_RadialInnerRadius, startAngle, sweepAngle)
+    else
+        points := BuildArcBandPoints(center, g_RadialBandInner, g_RadialBandOuter, startAngle, sweepAngle)
     SetPolygonWindowRegion(sectorHwnd, points)
     g_RadialSectorHwnds.Push(sectorHwnd)
     WinSet, Transparent, 225, ahk_id %sectorHwnd%
+
+    ; 扇区内的图标与键位角标。
+    ; 控件必须落在环带内：子控件同样受父窗口 Region 裁剪（当年把标签挪到环外就是这个原因），
+    ; 所以尺寸和半径都按环带厚度算，改 BandInnerRatio/BandOuterRatio 也不会被裁掉。
+    item := g_RadialItems[index]
+    midAngle := (startAngle + sweepAngle / 2) * 0.017453292519943
+    iconHwnd := 0, badgeHwnd := 0
+    if (g_RadialShowIcons) {
+        iconSize := Min(22, Max(12, Round(g_RadialBandThickness * 0.38)))
+        iconRadius := g_RadialBandMid + Round(g_RadialBandThickness * 0.19)
+        iconX := Round(center + Cos(midAngle) * iconRadius - iconSize / 2)
+        iconY := Round(center + Sin(midAngle) * iconRadius - iconSize / 2)
+        Gui, %guiName%:Add, Picture, x%iconX% y%iconY% w%iconSize% h%iconSize% +BackgroundTrans hwndIconHwnd
+        GuiControl, %guiName%:, %iconHwnd%, % "HICON:*" . GetWindowIcon(item.hwnd)
+    }
+    if (g_RadialShowBadges) {
+        badgeHeight := Min(16, Max(10, Round(g_RadialBandThickness * 0.26)))
+        badgeWidth := badgeHeight + 2
+        badgeRadius := g_RadialBandMid - Round(g_RadialBandThickness * 0.26)
+        badgeX := Round(center + Cos(midAngle) * badgeRadius - badgeWidth / 2)
+        badgeY := Round(center + Sin(midAngle) * badgeRadius - badgeHeight / 2)
+        Gui, %guiName%:Font, s8 cA8B8C8 w700, Microsoft YaHei
+        ; +BackgroundTrans 是必须的：扇区高亮时会整窗换色（Gui, Color），
+        ; 控件若不透明就会留下一块旧色补丁
+        Gui, %guiName%:Add, Text, x%badgeX% y%badgeY% w%badgeWidth% h%badgeHeight% Center +BackgroundTrans +0x200 hwndBadgeHwnd, % item.key
+    }
+    g_RadialBandIconHwnds.Push(iconHwnd)
+    g_RadialBandBadgeHwnds.Push(badgeHwnd)
 }
 
 CreateRadialLabel(index, menuX, menuY, diameter, center, startAngle, sweepAngle) {
-    global g_RadialItems, g_RadialOuterRadius, g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds, g_RadialLabelGuiNames
+    global g_RadialItems, g_RadialOuterRadius, g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds
+    global g_RadialLabelGuiNames, g_RadialLabelWinHwnds, g_RadialLabelMode
 
     item := g_RadialItems[index]
     itemCount := g_RadialItems.Length()
@@ -1775,9 +1859,64 @@ CreateRadialLabel(index, menuX, menuY, diameter, center, startAngle, sweepAngle)
     labelHwnd := WinExist()
     WinSet, Transparent, 235, ahk_id %labelHwnd%
     WinSet, AlwaysOnTop, On, ahk_id %labelHwnd%
+    ; LabelMode=Hover 时开局全部藏起来，等选中了再显示（UpdateRadialHighlight 负责）
+    if (g_RadialLabelMode = "Hover")
+        DllCall("ShowWindow", "Ptr", labelHwnd, "Int", 0)
     g_RadialSectorIconHwnds.Push(SectorIconHwnd)
     g_RadialSectorLabelHwnds.Push(SectorLabelHwnd)
     g_RadialLabelGuiNames.Push(labelGui)
+    g_RadialLabelWinHwnds.Push(labelHwnd)
+}
+
+; 生成"薄环带 + 两端圆头端帽"的闭合多边形，用于 SetWindowRgn。
+;
+; 为什么要有圆头：直角端看起来像"切歪了"，圆头（capsule）让相邻扇区之间那道
+; g_RadialGapDegrees 的缺口变成设计的一部分。
+;
+; 几何上的关键点：端帽是以**中径**为圆心、带厚一半为半径的半圆。
+; 于是外弧端点恰好落在端帽圆上（距离 = bandOuter - bandMid = capRadius），
+; 内弧端点同理，两段弧与端帽自然接上，不需要额外补偿。
+; 附带一个很好用的不变量：**所有顶点到圆心的距离都在 [bandInner, bandOuter] 内**
+; （端帽最外侧到圆心的距离是 sqrt(bandMid² + capRadius²) < bandOuter），
+; 测试台直接断言它就能守住形状，不必逐点比对坐标。
+BuildArcBandPoints(center, bandInner, bandOuter, startAngle, sweepAngle) {
+    bandMid := (bandInner + bandOuter) / 2
+    capRadius := (bandOuter - bandInner) / 2
+    arcPoints := Max(6, Ceil(sweepAngle / 4))
+    capPoints := 6
+    points := []
+
+    ; 外弧：起角 → 止角
+    Loop, % arcPoints + 1 {
+        radian := (startAngle + (A_Index - 1) * sweepAngle / arcPoints) * 0.017453292519943
+        points.Push({x: Round(center + Cos(radian) * bandOuter), y: Round(center + Sin(radian) * bandOuter)})
+    }
+
+    endAngle := startAngle + sweepAngle
+    endRadian := endAngle * 0.017453292519943
+    capCenterX := center + Cos(endRadian) * bandMid
+    capCenterY := center + Sin(endRadian) * bandMid
+    ; 止端半圆：从外弧端点绕端帽外侧 180° 转到内弧端点
+    Loop, % capPoints + 1 {
+        radian := (endAngle + (A_Index - 1) * 180 / capPoints) * 0.017453292519943
+        points.Push({x: Round(capCenterX + Cos(radian) * capRadius), y: Round(capCenterY + Sin(radian) * capRadius)})
+    }
+
+    ; 内弧：止角 → 起角（反向走，保证多边形不自交）
+    Loop, % arcPoints + 1 {
+        radian := (endAngle - (A_Index - 1) * sweepAngle / arcPoints) * 0.017453292519943
+        points.Push({x: Round(center + Cos(radian) * bandInner), y: Round(center + Sin(radian) * bandInner)})
+    }
+
+    startRadian := startAngle * 0.017453292519943
+    capCenterX := center + Cos(startRadian) * bandMid
+    capCenterY := center + Sin(startRadian) * bandMid
+    ; 起端半圆：从内弧端点绕端帽外侧 180° 转回外弧起点
+    Loop, % capPoints + 1 {
+        radian := (startAngle + 180 + (A_Index - 1) * 180 / capPoints) * 0.017453292519943
+        points.Push({x: Round(capCenterX + Cos(radian) * capRadius), y: Round(capCenterY + Sin(radian) * capRadius)})
+    }
+    return points
 }
 
 BuildAnnularSectorPoints(center, outerRadius, innerRadius, startAngle, sweepAngle) {
@@ -1844,6 +1983,7 @@ KeepRadialMenuOnTop() {
 DestroyRadialMenu() {
     global g_RadialItems, g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds, g_RadialLabelGuiNames
     global g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
+    global g_RadialLabelWinHwnds, g_RadialBandIconHwnds, g_RadialBandBadgeHwnds
 
     Loop, % g_RadialItems.Length() {
         guiName := "RadialSector" . A_Index
@@ -1855,6 +1995,9 @@ DestroyRadialMenu() {
     g_RadialSectorLabelHwnds := []
     g_RadialSectorIconHwnds := []
     g_RadialLabelGuiNames := []
+    g_RadialLabelWinHwnds := []
+    g_RadialBandIconHwnds := []
+    g_RadialBandBadgeHwnds := []
     g_RadialAppControlHwnd := 0
     g_RadialCenterControlHwnd := 0
     g_RadialIconControlHwnd := 0
@@ -1990,6 +2133,7 @@ UpdateRadialHighlight() {
     global g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds, g_RadialLabelGuiNames
     global g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
     global g_RadialNormalColor, g_RadialSelectedColor
+    global g_RadialBandBadgeHwnds, g_RadialLabelWinHwnds, g_RadialLabelMode
 
     Loop, % g_RadialItems.Length() {
         if (A_Index != g_RadialSelected && A_Index != g_RadialHighlighted)
@@ -1998,20 +2142,46 @@ UpdateRadialHighlight() {
         color := (A_Index == g_RadialSelected) ? g_RadialSelectedColor : g_RadialNormalColor
         Gui, %guiName%:Color, %color%
         sectorHwnd := g_RadialSectorHwnds[A_Index]
-        opacity := (A_Index == g_RadialSelected) ? 250 : 225
+        ; 薄环带本身就比原来的实心扇区轻，所以未选中项再压一点透明度，对比更明确
+        opacity := (A_Index == g_RadialSelected) ? 252 : 205
         WinSet, Transparent, %opacity%, ahk_id %sectorHwnd%
+        ; LabelMode=Never 时这些数组是空的，必须跳过：
+        ; 空 Gui 名会让 GuiControl 落到"默认 Gui"上，改错窗口的控件
         labelGui := g_RadialLabelGuiNames[A_Index]
-        labelHwnd := g_RadialSectorLabelHwnds[A_Index]
-        iconHwnd := g_RadialSectorIconHwnds[A_Index]
-        if (A_Index == g_RadialSelected) {
-            GuiControl, %labelGui%: +cFFFFFF, %labelHwnd%
-            GuiControl, %labelGui%: +cFFFFFF, %iconHwnd%
-        } else {
-            GuiControl, %labelGui%: +cD8DEE9, %labelHwnd%
-            GuiControl, %labelGui%: +cD8DEE9, %iconHwnd%
+        if (labelGui != "") {
+            labelHwnd := g_RadialSectorLabelHwnds[A_Index]
+            iconHwnd := g_RadialSectorIconHwnds[A_Index]
+            if (A_Index == g_RadialSelected) {
+                GuiControl, %labelGui%: +cFFFFFF, %labelHwnd%
+                GuiControl, %labelGui%: +cFFFFFF, %iconHwnd%
+            } else {
+                GuiControl, %labelGui%: +cD8DEE9, %labelHwnd%
+                GuiControl, %labelGui%: +cD8DEE9, %iconHwnd%
+            }
+        }
+        ; 键位角标跟着一起变：它是"这一格对应 Alt+几"的唯一提示
+        badgeHwnd := g_RadialBandBadgeHwnds[A_Index]
+        if (badgeHwnd) {
+            if (A_Index == g_RadialSelected)
+                GuiControl, %guiName%: +cFFFFFF, %badgeHwnd%
+            else
+                GuiControl, %guiName%: +cA8B8C8, %badgeHwnd%
         }
     }
     g_RadialHighlighted := g_RadialSelected
+
+    ; LabelMode=Hover：只留选中项的标签，其余整窗藏起来（比重建便宜，也不动层级）
+    if (g_RadialLabelMode = "Hover") {
+        Loop, % g_RadialItems.Length() {
+            labelWin := g_RadialLabelWinHwnds[A_Index]
+            if (!labelWin)
+                continue
+            if (A_Index = g_RadialSelected)
+                DllCall("ShowWindow", "Ptr", labelWin, "Int", 4)   ; SW_SHOWNOACTIVATE
+            else
+                DllCall("ShowWindow", "Ptr", labelWin, "Int", 0)   ; SW_HIDE
+        }
+    }
 
     if (g_RadialSelected) {
         item := g_RadialItems[g_RadialSelected]
@@ -2021,9 +2191,10 @@ UpdateRadialHighlight() {
         GuiControl, RadialCenter:, %g_RadialAppControlHwnd%, % item.app
         GuiControl, RadialCenter:, %g_RadialCenterControlHwnd%, % item.fullTitle
     } else {
+        ; 死区：明确告诉用户"松开就等于取消"，比只写"移动鼠标"少一次试错
         GuiControl, RadialCenter:Hide, %g_RadialIconControlHwnd%
         GuiControl, RadialCenter:, %g_RadialAppControlHwnd%, 移动鼠标选择窗口
-        GuiControl, RadialCenter:, %g_RadialCenterControlHwnd%,
+        GuiControl, RadialCenter:, %g_RadialCenterControlHwnd%, 松开即取消
     }
 }
 
