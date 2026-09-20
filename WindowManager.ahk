@@ -11,37 +11,70 @@ CoordMode, ToolTip, Screen
 ; =======================================================
 global IniFile := A_ScriptDir . "\config.ini"
 
+; 快捷键默认值集中在这里，有两个用途：
+;   1. 作为 IniRead 的兜底（配置文件缺项时用）；
+;   2. 作为注册失败时的回退目标（见 RegisterHotkey），所以不能只在 IniRead 里写死。
+global DefaultTriggerModifier := "!"
+global DefaultBindModifier := "^!"
+global DefaultUnbindModifier := "^+"
+global DefaultPinHotkey := "!T"
+global DefaultSnapshotHotkey := "!0"
+global DefaultPreviewHotkey := "!vkC0"
+global DefaultRadialHotkey := "!="
+global DefaultRadialHotkeyAlt := "!-"
+global DefaultWindowMenuHotkey := "!M"
+global DefaultCamouflageEditKey := "Shift"
+global DefaultConfigHotkey := "^!vkC0"
+
 ; 读取配置文件，如果没有则使用默认值
-IniRead, TriggerModifier, %IniFile%, Hotkeys, TriggerModifier, !
-IniRead, BindModifier, %IniFile%, Hotkeys, BindModifier, ^!
-IniRead, UnbindModifier, %IniFile%, Hotkeys, UnbindModifier, ^+
-IniRead, PinHotkey, %IniFile%, Hotkeys, PinHotkey, !T
-IniRead, SnapshotHotkey, %IniFile%, Hotkeys, SnapshotHotkey, !0
-IniRead, PreviewHotkey, %IniFile%, Hotkeys, PreviewHotkey, !vkC0
-IniRead, RadialHotkey, %IniFile%, Hotkeys, RadialHotkey, !=
-IniRead, RadialHotkeyAlt, %IniFile%, Hotkeys, RadialHotkeyAlt, !-
+IniRead, TriggerModifier, %IniFile%, Hotkeys, TriggerModifier, %DefaultTriggerModifier%
+IniRead, BindModifier, %IniFile%, Hotkeys, BindModifier, %DefaultBindModifier%
+IniRead, UnbindModifier, %IniFile%, Hotkeys, UnbindModifier, %DefaultUnbindModifier%
+IniRead, PinHotkey, %IniFile%, Hotkeys, PinHotkey, %DefaultPinHotkey%
+IniRead, SnapshotHotkey, %IniFile%, Hotkeys, SnapshotHotkey, %DefaultSnapshotHotkey%
+IniRead, PreviewHotkey, %IniFile%, Hotkeys, PreviewHotkey, %DefaultPreviewHotkey%
+IniRead, RadialHotkey, %IniFile%, Hotkeys, RadialHotkey, %DefaultRadialHotkey%
+IniRead, RadialHotkeyAlt, %IniFile%, Hotkeys, RadialHotkeyAlt, %DefaultRadialHotkeyAlt%
 IniRead, RadialOffsetX, %IniFile%, RadialMenu, OffsetX, 0
 IniRead, RadialOffsetY, %IniFile%, RadialMenu, OffsetY, 0
 IniRead, RadialSize, %IniFile%, RadialMenu, Size, 220
 IniRead, RadialNormalColor, %IniFile%, RadialMenu, NormalColor, 3A4658
 IniRead, RadialSelectedColor, %IniFile%, RadialMenu, SelectedColor, 4FC3F7
 IniRead, RadialCenterColor, %IniFile%, RadialMenu, CenterColor, 202833
-IniRead, WindowMenuHotkey, %IniFile%, Hotkeys, WindowMenuHotkey, !M
-IniRead, CamouflageEditKey, %IniFile%, Hotkeys, CamouflageEditKey, Shift
-IniRead, ConfigHotkey, %IniFile%, Hotkeys, ConfigHotkey, ^!vkC0
-RadialHotkey := NormalizeRadialHotkey(RadialHotkey)
-RadialHotkeyAlt := NormalizeRadialHotkey(RadialHotkeyAlt)
+IniRead, WindowMenuHotkey, %IniFile%, Hotkeys, WindowMenuHotkey, %DefaultWindowMenuHotkey%
+IniRead, CamouflageEditKey, %IniFile%, Hotkeys, CamouflageEditKey, %DefaultCamouflageEditKey%
+IniRead, ConfigHotkey, %IniFile%, Hotkeys, ConfigHotkey, %DefaultConfigHotkey%
+RadialHotkey := NormalizeHotkeySpelling(RadialHotkey)
+RadialHotkeyAlt := NormalizeHotkeySpelling(RadialHotkeyAlt)
+
+; 启动告警收集器。必须在下面任何 SanitizeModifier / RegisterHotkey 之前建好，
+; 否则第一条告警会因为往空变量上 Push 而抛错。
+global g_RegisteredHotkeys := {}
+global g_StartupWarnings := []
+
+; 三个修饰键要拼在 1~9 前面成为完整热键，所以先做形状校验：
+; 非法值整体回退默认，避免出现"1~8 注册成功、9 失败"这种半截状态，
+; 同时把结果写回变量，让配置页下拉框显示的就是真正生效的修饰键。
+TriggerModifier := SanitizeModifier(TriggerModifier, DefaultTriggerModifier, "呼出/隐藏修饰键")
+BindModifier := SanitizeModifier(BindModifier, DefaultBindModifier, "绑定修饰键")
+UnbindModifier := SanitizeModifier(UnbindModifier, DefaultUnbindModifier, "解绑修饰键")
+; 抑制键不是热键而是"按住才生效"的键，判定方式不同（见 IsUsableKeyName）
+CamouflageEditKey := SanitizeKeyName(CamouflageEditKey, DefaultCamouflageEditKey, "迷彩编辑抑制键")
 
 ; 提取按键的物理键，供 KeyWait 使用 (剔除修饰符)
-global PreviewPhysicalKey := RegExReplace(PreviewHotkey, "^[\^\!\+\#\<\>\*\$~]+", "")
-global RadialPhysicalKey := RegExReplace(RadialHotkey, "^[\^\!\+\#\<\>\*\$~]+", "")
+; 注意只保留真正会被读的那个：轮盘用的是 A_ThisHotkey 现算的键，不需要全局副本
+global PreviewPhysicalKey := StripHotkeyModifiers(PreviewHotkey)
 
 global KeyList := ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 global WindowBindings := {}
 global WindowIsOverlaid := {}     
+; 注意：下面几张表用绑定键（"1"~"9"）作下标。AHK v1 里 obj["1"]（字面量）与 obj[变量]
+; 即使变量里就是同一个字符串，也可能落到不同条目上（v1.1.37 实测：字面量写得进、
+; 变量读不出）。所以这几张表的读写一律用变量下标，别图省事写成字面量。
 global RestoreData_Active := {}   
 global RestoreData_Above := {}    
 global RestoreData_MinMax := {}   
+global RestoreData_Topmost := {}  
 global g_TriggerModifier := TriggerModifier 
 global g_BindModifier := BindModifier
 global g_UnbindModifier := UnbindModifier
@@ -50,11 +83,9 @@ global g_RadialOriginX := 0
 global g_RadialOriginY := 0
 global g_RadialCenterX := 0
 global g_RadialCenterY := 0
-global g_RadialVirtualX := 0
-global g_RadialVirtualY := 0
-global g_RadialLastMouseX := 0
-global g_RadialLastMouseY := 0
 global g_RadialSelected := 0
+; 当前被高亮成"选中色"的扇区，用于把重绘限制在变化的那两个扇区上
+global g_RadialHighlighted := 0
 global g_RadialItems := []
 global g_RadialOffsetX := RadialOffsetX + 0
 global g_RadialOffsetY := RadialOffsetY + 0
@@ -67,7 +98,6 @@ global g_RadialSelectedColor := NormalizeColor(RadialSelectedColor, "4FC3F7")
 global g_RadialCenterColor := NormalizeColor(RadialCenterColor, "202833")
 global g_RadialGapDegrees := 2
 global g_RadialMenuPadding := 8
-global g_RadialDeadZone := g_RadialInnerRadius
 global g_RadialHwnd := 0
 global g_RadialSectorHwnds := []
 global g_RadialSectorLabelHwnds := []
@@ -76,11 +106,17 @@ global g_RadialLabelGuiNames := []
 global g_RadialAppControlHwnd := 0
 global g_RadialCenterControlHwnd := 0
 global g_RadialIconControlHwnd := 0
-global g_RadialIgnoreCursorDelta := false
 global WindowStateByHwnd := {}
 global g_WindowMenuTargetHwnd := 0
 global g_WindowMenuOpen := false
 global g_WindowMenuHwnd := 0
+; 整条的布局尺寸（逻辑像素）。放在全局是因为定位数学有两个调用点：
+; 新建整条时定位、目标窗口移动后跟随（见 ComputeWindowMenuPos）。
+global g_WindowMenuWidth := 704
+global g_WindowMenuHeight := 100
+; 上一次看到的窗口左上角，用来判断"窗口动了没有"，避免每 tick 都重算定位
+global g_WindowMenuTargetX := 0
+global g_WindowMenuTargetY := 0
 global g_CamouflageHideDelay := 250
 ; 控制条与目标窗口之间留的视觉缝隙（物理像素），同时是一条坐标契约：
 ; 这条缝隙既不在窗口矩形里、也不在整条矩形里，而鼠标从窗口挪向整条必然要穿过它，
@@ -94,6 +130,11 @@ global g_WindowMenuHideAt := 0
 global g_CamouflageEditKey := CamouflageEditKey
 global g_CamouflageGuiNames := {}
 global g_CamouflageGuiHwnds := {}
+; 编辑态正在被拖动的那个触发区。区域重叠时，鼠标会同时落在多个触发区里，
+; 没有这个归属标记就会一次拖走好几块。
+global g_CamouflageDragOwner := 0
+; 呼出/隐藏判定里给窗口矩形留的容差（物理像素），与 g_WindowMenuHoverPad 同类
+global g_CamouflageWindowPad := 8
 global g_RadialPreviewKey := 0
 global g_RadialPreviewWasMinimized := false
 global g_RadialPreviewHwnd := 0
@@ -105,24 +146,37 @@ global g_RadialZOrderSnapshot := []
 ; =======================================================
 ; 🚀 2. 动态注册所有快捷键
 ; =======================================================
+; 全部走 RegisterHotkey：它把"配置里的值不能用"这件事变成一次降级，而不是一次崩溃。
+; 之前直接 Hotkey 的写法有两个致命处（均在 v1.1.37 实测）：
+;   1. 非法键名会让 Hotkey 命令抛错并终止脚本 —— 若坏的是 ConfigHotkey，
+;      重启后连配置页都打不开，只能手改 config.ini 才能救回来；
+;   2. 重复注册同一个键不报错，AHK 会静默把前一个标签顶掉，功能无声消失。
+; 现在：非法值回退到该功能的默认键，与已注册键冲突的跳过，两者都会记进 g_StartupWarnings。
+; 每个字段都把生效值写回变量：配置页显示的就是实际注册成功的键，不会"看着是 A、实际是 B"。
 for index, key in KeyList {
-    Hotkey, %g_BindModifier%%key%, BindHandler       
-    Hotkey, %g_UnbindModifier%%key%, UnbindHandler     
-    Hotkey, $*%g_TriggerModifier%%key%, TriggerHandler 
+    RegisterHotkey(g_BindModifier . key, "BindHandler", DefaultBindModifier . key, "")
+    RegisterHotkey(g_UnbindModifier . key, "UnbindHandler", DefaultUnbindModifier . key, "")
+    RegisterHotkey(g_TriggerModifier . key, "TriggerHandler", DefaultTriggerModifier . key)
 }
-
-Hotkey, $*%SnapshotHotkey%, SnapshotHandler
-Hotkey, $*%PreviewHotkey%, PreviewHandler
-Hotkey, $*%RadialHotkey%, RadialHandler
-Hotkey, $*%WindowMenuHotkey%, WindowMenuHandler
+SnapshotHotkey := RegisterHotkey(SnapshotHotkey, "SnapshotHandler", DefaultSnapshotHotkey)
+PreviewHotkey := RegisterHotkey(PreviewHotkey, "PreviewHandler", DefaultPreviewHotkey)
+RadialHotkey := RegisterHotkey(RadialHotkey, "RadialHandler", DefaultRadialHotkey)
+WindowMenuHotkey := RegisterHotkey(WindowMenuHotkey, "WindowMenuHandler", DefaultWindowMenuHotkey)
 if (RadialHotkeyAlt != RadialHotkey)
-    Hotkey, $*%RadialHotkeyAlt%, RadialHandler
-Hotkey, $*%PinHotkey%, PinHandler
-Hotkey, %ConfigHotkey%, ShowConfigGUI
+    RadialHotkeyAlt := RegisterHotkey(RadialHotkeyAlt, "RadialHandler", DefaultRadialHotkeyAlt)
+PinHotkey := RegisterHotkey(PinHotkey, "PinHandler", DefaultPinHotkey)
+ConfigHotkey := RegisterHotkey(ConfigHotkey, "ShowConfigGUI", DefaultConfigHotkey, "")
+
+; 物理键要在注册之后重新提取：上面可能刚刚把非法值换成了默认值
+PreviewPhysicalKey := StripHotkeyModifiers(PreviewHotkey)
+
 SetTimer, CamouflageTimer, 30
 
-; 启动时给出优雅的 OSD 提示，告诉用户如何打开设置
-ShowOSD("🚀 启动成功！按 " . FormatHotkey(ConfigHotkey) . " 打开配置", 2500)
+; 有快捷键没生效时优先报这个：它比"怎么打开配置"更需要用户知道
+if (g_StartupWarnings.Length())
+    ShowOSD("⚠️ " . JoinText(g_StartupWarnings, "；"), 5000)
+else
+    ShowOSD("🚀 启动成功！按 " . FormatHotkey(ConfigHotkey) . " 打开配置", 2500)
 return 
 ; ------------------- 自动执行段结束 -------------------
 
@@ -204,8 +258,8 @@ return
 
 SaveConfig:
     Gui, Config:Submit
-    UI_Radial := NormalizeRadialHotkey(UI_Radial)
-    UI_RadialAlt := NormalizeRadialHotkey(UI_RadialAlt)
+    UI_Radial := NormalizeHotkeySpelling(UI_Radial)
+    UI_RadialAlt := NormalizeHotkeySpelling(UI_RadialAlt)
     UI_RadialNormalColor := NormalizeColor(UI_RadialNormalColor, "3A4658")
     UI_RadialSelectedColor := NormalizeColor(UI_RadialSelectedColor, "4FC3F7")
     UI_RadialCenterColor := NormalizeColor(UI_RadialCenterColor, "202833")
@@ -213,6 +267,30 @@ SaveConfig:
     RegExMatch(UI_Trigger, "^[^\s]+", newTrigger)
     RegExMatch(UI_Bind, "^[^\s]+", newBind)
     RegExMatch(UI_Unbind, "^[^\s]+", newUnbind)
+
+    ; 写盘前先校验：坏值一旦落进 config.ini，下次启动就靠"回退默认值"去救，
+    ; 用户看到的将是"我明明设了却没生效"。能在这里拦住就别留给启动时兜底。
+    errorMessage := ""
+    if (!ValidateHotkeyInput(UI_Pin, "全局置顶按键", errorMessage)
+        || !ValidateHotkeyInput(UI_Snapshot, "记录层级快照按键", errorMessage)
+        || !ValidateHotkeyInput(UI_Preview, "实时预览面板按键", errorMessage)
+        || !ValidateHotkeyInput(UI_Radial, "主轮盘按键", errorMessage)
+        || !ValidateHotkeyInput(UI_RadialAlt, "备用轮盘按键", errorMessage)
+        || !ValidateHotkeyInput(UI_WindowMenu, "当前窗口控制条按键", errorMessage)
+        || !ValidateHotkeyInput(UI_Config, "配置页按键", errorMessage)) {
+        ShowOSD("⚠️ " . errorMessage . "，未保存", 3000)
+        return
+    }
+    conflictMessage := FindHotkeyConflict(newTrigger, newBind, newUnbind, UI_Pin, UI_Snapshot, UI_Preview, UI_Radial, UI_RadialAlt, UI_WindowMenu, UI_Config)
+    if (conflictMessage != "") {
+        ShowOSD("⚠️ " . conflictMessage . "，未保存", 3000)
+        return
+    }
+    ; 抑制键单独校验：它允许是裸修饰键（默认就是 Shift），所以不能套用热键那套规则
+    if (!IsUsableKeyName(UI_CamouflageEditKey)) {
+        ShowOSD("⚠️ 迷彩编辑抑制键「" . Trim(UI_CamouflageEditKey) . "」不是可用键名，未保存", 3000)
+        return
+    }
     
     IniWrite, %newTrigger%, %IniFile%, Hotkeys, TriggerModifier
     IniWrite, %newBind%, %IniFile%, Hotkeys, BindModifier
@@ -251,10 +329,17 @@ return
 ; =======================================================
 ; 📌 4. 全局置顶/取消置顶
 ; =======================================================
+; 置顶状态有三个"副本"：窗口真实的 WS_EX_TOPMOST、state.alwaysOnTop、控制条复选框。
+; 这里一律以 ExStyle 为准来翻转，再通过 SetWindowTopmost 写回 state，
+; 保证控制条上看到的就是真的（此前只 WinSet 不写 state，勾选态会和实际相反）。
 PinHandler:
     WinGet, currentHwnd, ID, A
     if (!currentHwnd)
         return
+    if (IsScriptGui(currentHwnd)) {
+        ShowOSD("请选择一个普通应用窗口")
+        return
+    }
     WinGetTitle, title, ahk_id %currentHwnd%
     if (StrLen(title) > 12)
         title := SubStr(title, 1, 11) . "…"
@@ -263,10 +348,10 @@ PinHandler:
 
     WinGet, exStyle, ExStyle, ahk_id %currentHwnd%
     if (exStyle & 0x8) {
-        WinSet, AlwaysOnTop, Off, ahk_id %currentHwnd%
+        SetWindowTopmost(currentHwnd, false)
         ShowOSD("🔽 已取消置顶: " . title)
     } else {
-        WinSet, AlwaysOnTop, On, ahk_id %currentHwnd%
+        SetWindowTopmost(currentHwnd, true)
         ShowOSD("📌 窗口已置顶: " . title)
     }
 return
@@ -328,7 +413,9 @@ return
 ; =======================================================
 PreviewHandler:
     ShowPreview()
-    KeyWait, %PreviewPhysicalKey%  
+    ; 带超时：万一 up 事件丢了（外部工具顶掉键盘钩子等），没有超时就会永久卡在这里，
+    ; 预览面板会一直挂在屏幕上
+    KeyWait, %PreviewPhysicalKey%, T60
     Gui, Preview:Destroy  
 return
 
@@ -475,6 +562,9 @@ WindowMenuBindChanged:
         UnbindWindow(g_WindowMenuTargetHwnd)
     else
         BindWindowToKey(g_WindowMenuTargetHwnd, UI_WindowMenuBind)
+    ; 绑定关系变了，"已占用"提示跟着变（放开一个键后它就不再被占用），
+    ; 不刷新的话下方提示会一直停在上一次的内容上
+    UpdateWindowMenuBindHint(g_WindowMenuTargetHwnd)
 return
 WindowMenuResizeByWidth:
     Gui, WindowMenu:Submit, NoHide
@@ -524,6 +614,16 @@ UpdateWindowMenuTriggerValue(hwnd) {
     GuiControl, WindowMenu:, WindowMenuTriggerValue, % state.triggerWidth . " × " . state.triggerHeight
 }
 
+; 增量刷新：只改"已占用"提示那一行
+UpdateWindowMenuBindHint(hwnd) {
+    global g_WindowMenuOpen
+
+    if (!g_WindowMenuOpen)
+        return
+    bindChoices := BuildBindingChoices(hwnd, occupiedKeys)
+    GuiControl, WindowMenu:, WindowMenuBindHint, % occupiedKeys != "" ? "已占用 " . occupiedKeys : ""
+}
+
 ; 增量刷新：把置顶 / 迷彩两个复选框拨回窗口的真实状态。
 ; 用于操作可能失败的场合——例如窗口已最小化时 SetCamouflage 会直接返回、并不真的启用迷彩，
 ; 此时复选框已被用户勾上，必须回读 state 纠正，否则显示与实际不一致。
@@ -534,6 +634,8 @@ SyncWindowMenuToggles(hwnd) {
     if (!g_WindowMenuOpen)
         return
     state := EnsureWindowState(hwnd)
+    ; 置顶以窗口真实状态为准（用户可能在这期间按过 Alt+T），不能只信 state
+    state.alwaysOnTop := IsWindowTopmost(hwnd)
     GuiControl, WindowMenu:, UI_WindowCamouflage, % state.camouflageEnabled ? 1 : 0
     GuiControl, WindowMenu:, UI_WindowTopmost, % state.alwaysOnTop ? 1 : 0
 }
@@ -548,7 +650,9 @@ GetWindowBindingKey(hwnd) {
     return "无"
 }
 
-UnbindWindow(hwnd) {
+; silent：被 BindWindowToKey 调用时不要弹"已解除绑定"——
+; 那条 OSD 会立刻被后面的"已绑定到…"顶掉，屏幕上只剩一次闪烁
+UnbindWindow(hwnd, silent := false) {
     global KeyList, WindowBindings, WindowIsOverlaid
 
     for index, key in KeyList {
@@ -557,7 +661,8 @@ UnbindWindow(hwnd) {
             WindowIsOverlaid[key] := false
         }
     }
-    ShowOSD("当前窗口已解除绑定")
+    if (!silent)
+        ShowOSD("当前窗口已解除绑定")
 }
 
 BuildBindingChoices(hwnd, ByRef occupiedKeys) {
@@ -586,7 +691,7 @@ BindWindowToKey(hwnd, bindKey) {
         ShowOSD("该绑定键已被其他窗口占用")
         return
     }
-    UnbindWindow(hwnd)
+    UnbindWindow(hwnd, true)
     WindowBindings[bindKey] := hwnd
     WindowIsOverlaid[bindKey] := false
     ShowOSD("当前窗口已绑定到: [" . GetDisplayName(bindKey) . "]")
@@ -599,7 +704,7 @@ EnsureWindowState(hwnd) {
     global WindowStateByHwnd
 
     if (!WindowStateByHwnd.HasKey(hwnd))
-        WindowStateByHwnd[hwnd] := {opacity: 255, alwaysOnTop: false, camouflageEnabled: false, camouflageHidden: false, triggerWidth: 240, triggerHeight: 135, x: 0, y: 0, width: 0, height: 0, triggerX: 0, triggerY: 0, hoverArmed: true, hideAt: 0, editX: 0, editY: 0, editWidth: 0, editHeight: 0, aspectRatio: 0, aspectRatioLocked: true, resizeBaseWidth: 0, resizeBaseHeight: 0, preserveSize: false, preserveWidth: 0, preserveHeight: 0, preserveLastX: 0, preserveLastY: 0, preserveHasPosition: false, preservePending: false, dragMode: "", dragStartX: 0, dragStartY: 0, dragStartLeft: 0, dragStartTop: 0, dragStartWidth: 0, dragStartHeight: 0, revealTick: 0, hideTick: 0, appliedX: -99999, appliedY: -99999, appliedWidth: 0, appliedHeight: 0, regionClickThrough: -1, pinned: false}
+        WindowStateByHwnd[hwnd] := {opacity: 255, alwaysOnTop: false, camouflageEnabled: false, camouflageHidden: false, triggerWidth: 240, triggerHeight: 135, triggerX: 0, triggerY: 0, hideAt: 0, editX: 0, editY: 0, editWidth: 0, editHeight: 0, aspectRatio: 0, aspectRatioLocked: true, resizeBaseWidth: 0, resizeBaseHeight: 0, preserveSize: false, preserveWidth: 0, preserveHeight: 0, preserveLastX: 0, preserveLastY: 0, preserveHasPosition: false, preservePending: false, dragMode: "", dragStartX: 0, dragStartY: 0, dragStartLeft: 0, dragStartTop: 0, dragStartWidth: 0, dragStartHeight: 0, revealTick: 0, hideTick: 0, appliedX: -99999, appliedY: -99999, appliedWidth: 0, appliedHeight: 0, regionClickThrough: -1, regionVisible: -1, pinned: false}
     return WindowStateByHwnd[hwnd]
 }
 
@@ -640,7 +745,6 @@ ResizeTargetWindow(hwnd, requestedWidth, requestedHeight, resizeBy, keepAspectRa
 
     resizeSucceeded := ForceResizeTargetWindow(hwnd, x, y, newWidth, newHeight)
     WinGetPos, newX, newY, actualWidth, actualHeight, ahk_id %hwnd%
-    state.x := newX, state.y := newY, state.width := actualWidth, state.height := actualHeight
     if (keepAspectRatio && actualHeight)
         state.aspectRatio := actualWidth / actualHeight
     if (state.camouflageEnabled)
@@ -674,13 +778,24 @@ ForceResizeTargetWindow(hwnd, x, y, width, height) {
     return false
 }
 
+; 把窗口钉在控制条里刚调好的尺寸上。
+;
+; 这套机制的适用范围必须严格限定，否则会变成"这个窗口再也改不了大小"：
+;   · 只在控制条正对着这个窗口开着的时候生效 —— 那才是"我正在调它的尺寸"的时段。
+;     控制条一关，DestroyWindowMenu 就会把 preserveSize 清掉，窗口重新自由。
+;   · 最小化和最大化都直接跳过：WinGetPos 对最小化窗口返回 -32000 与垃圾尺寸，
+;     而最大化/全屏本来就是"尺寸被外部改变"的正常情况，拉回去会把 F11 全屏顶掉。
 PreserveTargetWindowSize(hwnd) {
+    global g_WindowMenuOpen, g_WindowMenuTargetHwnd
+
     state := EnsureWindowState(hwnd)
     if (!state.preserveSize || !WinExist("ahk_id " . hwnd) || state.camouflageHidden)
         return
+    if (!g_WindowMenuOpen || g_WindowMenuTargetHwnd != hwnd)
+        return
 
     WinGet, minMax, MinMax, ahk_id %hwnd%
-    if (minMax = -1)
+    if (minMax != 0)
         return
 
     WinGetPos, currentX, currentY, currentWidth, currentHeight, ahk_id %hwnd%
@@ -711,7 +826,6 @@ PreserveTargetWindowSize(hwnd) {
         ForceResizeTargetWindow(hwnd, currentX, currentY, state.preserveWidth, state.preserveHeight)
 
     WinGetPos, actualX, actualY, actualWidth, actualHeight, ahk_id %hwnd%
-    state.x := actualX, state.y := actualY, state.width := actualWidth, state.height := actualHeight
     state.preserveLastX := actualX
     state.preserveLastY := actualY
     state.preserveHasPosition := true
@@ -724,7 +838,6 @@ UpdateCamouflageTrigger(hwnd) {
 
     state := EnsureWindowState(hwnd)
     WinGetPos, x, y, width, height, ahk_id %hwnd%
-    state.x := x, state.y := y, state.width := width, state.height := height
     if (!state.editWidth) {
         state.editX := Round(x + (width - state.triggerWidth) / 2)
         state.editY := Round(y + (height - state.triggerHeight) / 2)
@@ -744,6 +857,11 @@ SetCamouflageSize(hwnd, width, height) {
     state := EnsureWindowState(hwnd)
     state.editWidth := width, state.editHeight := height
     state.triggerWidth := width, state.triggerHeight := height
+    ; 换大尺寸预设时区域可能伸出屏幕（比如原位置贴右下角），同样要收回来
+    newX := state.editX, newY := state.editY
+    ClampCamouflageRegion(newX, newY, width, height)
+    state.editX := state.triggerX := newX
+    state.editY := state.triggerY := newY
     if (WinExist("ahk_id " . hwnd))
         UpdateCamouflageTrigger(hwnd)
     ShowOSD("迷彩区域: " . width . " × " . height)
@@ -761,6 +879,9 @@ SetWindowOpacity(hwnd, opacity) {
         WinSet, Transparent, %opacity%, ahk_id %hwnd%
 }
 
+; 置顶的唯一写入口：先写 state 再落到窗口，这样 state 始终是"用户意图"的权威记录。
+; 所有直接 WinSet, AlwaysOnTop 的地方都应改走这里，否则 state 会和实际脱节
+; （控制条勾选态、呼出后是否恢复置顶都依赖它）。
 SetWindowTopmost(hwnd, enabled) {
     global WindowStateByHwnd
 
@@ -768,6 +889,23 @@ SetWindowTopmost(hwnd, enabled) {
     state.alwaysOnTop := enabled
     setting := enabled ? "On" : "Off"
     WinSet, AlwaysOnTop, %setting%, ahk_id %hwnd%
+}
+
+; 读窗口真实的置顶状态。
+; 不能拿 state.alwaysOnTop 当"现状"用：用户可能刚用 Alt+T 改过、
+; 或窗口被别的程序改过，只有 ExStyle 说的是实话。
+IsWindowTopmost(hwnd) {
+    if (!WinExist("ahk_id " . hwnd))
+        return false
+    WinGet, exStyle, ExStyle, ahk_id %hwnd%
+    return (exStyle & 0x8) ? true : false
+}
+
+; 把 state 里记的置顶状态同步成窗口的真实状态（开控制条时调用，让复选框说实话）
+SyncWindowTopmostState(hwnd) {
+    state := EnsureWindowState(hwnd)
+    state.alwaysOnTop := IsWindowTopmost(hwnd)
+    return state.alwaysOnTop
 }
 
 SetCamouflage(hwnd, enabled) {
@@ -795,7 +933,6 @@ SetCamouflage(hwnd, enabled) {
     UpdateCamouflageTrigger(hwnd)
     state.camouflageEnabled := true
     state.camouflageHidden := true
-    state.hoverArmed := true
     CreateCamouflageRegion(hwnd)
     HideCamouflageWindow(hwnd)
     DestroyWindowMenu()
@@ -805,8 +942,8 @@ SetCamouflage(hwnd, enabled) {
 HideCamouflageWindow(hwnd) {
     global WindowStateByHwnd
     state := EnsureWindowState(hwnd)
-    WinGetPos, x, y, w, h, ahk_id %hwnd%
-    state.originalX := x, state.originalY := y, state.originalWidth := w, state.originalHeight := h
+    ; 不记录"原始位置/尺寸"：WinMinimize + WinRestore 由系统还原到收起前的几何，
+    ; 这里再存一份只会在窗口被外部移动后变成过期数据（此前那几个 original* 字段从没被读过）
     WinMinimize, ahk_id %hwnd%
     state.camouflageHidden := true
     state.hideAt := 0
@@ -840,6 +977,7 @@ CreateCamouflageRegion(hwnd) {
     state.appliedX := state.triggerX, state.appliedY := state.triggerY
     state.appliedWidth := state.triggerWidth, state.appliedHeight := state.triggerHeight
     state.regionClickThrough := 1
+    state.regionVisible := 1
 }
 
 DestroyCamouflageRegion(hwnd) {
@@ -855,6 +993,7 @@ DestroyCamouflageRegion(hwnd) {
         state.appliedX := -99999, state.appliedY := -99999
         state.appliedWidth := 0, state.appliedHeight := 0
         state.regionClickThrough := -1
+        state.regionVisible := -1
     }
 }
 
@@ -863,6 +1002,12 @@ UpdateCamouflageRegion(hwnd) {
     state := EnsureWindowState(hwnd)
     regionHwnd := g_CamouflageGuiHwnds[hwnd]
     if (!regionHwnd)
+        return
+    ; 藏起来的这段时间一律不下发几何：DetectHiddenWindows 默认 Off，
+    ; WinMove / WinSet 根本找不到隐藏窗口，会静默失败——却照样把 applied* 基线刷成新值，
+    ; 于是区域再露脸时脏检查认为"已经是新几何"，人却永远停在旧位置上。
+    ; 什么都不做则 applied* 仍如实记录窗口的真实几何，重新显示时那次脏检查自然会补上。
+    if (state.regionVisible = 0)
         return
     ; 脏检查：轮询每秒会把这里叫上 33 次。位置没变就不必 WinMove；
     ; 尺寸没变则绝不重设 Region——SetWindowRgn 是这条链路上最贵的一次调用，也是边缘闪烁的来源。
@@ -895,6 +1040,35 @@ SetCamouflageRegionClickThrough(hwnd, state, enabled) {
     else
         WinSet, ExStyle, -0x20, ahk_id %regionHwnd%
     state.regionClickThrough := enabled
+}
+
+; 触发区只在窗口收起时才该露脸。窗口呼出后区域仍浮在最上层的话，
+; 它那块半透明蓝色会直接糊在画面上——窗口自身透明度调低时尤其明显。
+; 同样做状态缓存，避免每 tick 白烧一次 ShowWindow。
+SetCamouflageRegionVisible(hwnd, state, visible) {
+    global g_CamouflageGuiHwnds
+    if (state.regionVisible = visible)
+        return
+    regionHwnd := g_CamouflageGuiHwnds[hwnd]
+    if (!regionHwnd)
+        return
+    ; SW_SHOWNOACTIVATE(4) / SW_HIDE(0)：Gui,Show 会抢激活，这里必须用 ShowWindow
+    DllCall("ShowWindow", "Ptr", regionHwnd, "Int", visible ? 4 : 0)
+    state.regionVisible := visible
+    ; 先记状态再补几何：UpdateCamouflageRegion 在隐藏期是空转的，
+    ; 藏着时被改过的尺寸（控制条换预设）要靠这一次补发才能按新几何露出来。
+    if (visible)
+        UpdateCamouflageRegion(hwnd)
+}
+
+; 控制条开着时该窗口正在被调参——三档尺寸预设需要看得见区域才有反馈，
+; 所以这段时间即使窗口是亮着的也不藏。
+; 独立成函数只是为了让调用点读起来是"这件事成不成立"，
+; 而不是在 CheckCamouflageWindows 里再塞两个全局进去（global 声明与位置无关，
+; 在同一个函数里再声明一次并不算错，只是没必要）。
+IsCamouflageRegionTweaking(hwnd) {
+    global g_WindowMenuOpen, g_WindowMenuTargetHwnd
+    return (g_WindowMenuOpen && g_WindowMenuTargetHwnd = hwnd)
 }
 
 ; 把 camouflageHidden 拨回窗口的真实最小化状态。
@@ -936,18 +1110,44 @@ CamouflageRegionMouseDown(hwnd, mouseX, mouseY) {
     state.dragStartWidth := state.triggerWidth, state.dragStartHeight := state.triggerHeight
 }
 
+; 把迷彩触发区钳制在虚拟屏幕范围内。
+;
+; 触发区是窗口的呼出入口：没有绑定快捷键的窗口，鼠标进入触发区是把它叫回来的唯一手段。
+; 一旦被拖到屏幕外（或换成大尺寸预设后伸出屏幕），就再也点不到它了。
+; 多显示器用虚拟屏幕的并集包围盒，不追求逐屏判断——只要保证整块矩形落在"看得见"的范围内。
+ClampCamouflageRegion(ByRef x, ByRef y, width, height) {
+    SysGet, vsLeft, 76
+    SysGet, vsTop, 77
+    SysGet, vsWidth, 78
+    SysGet, vsHeight, 79
+    if (vsWidth < 1 || vsHeight < 1)
+        return
+    ; +0：把空值/非数值先归一成 0。Min/Max 遇到非数值会一路把空串传出去，
+    ; 那样 WinMove 会收到一个空坐标（AHK 视作"不改这一维"），区域就静默不动了
+    x := Max(vsLeft, Min(x + 0, vsLeft + vsWidth - width))
+    y := Max(vsTop, Min(y + 0, vsTop + vsHeight - height))
+}
+
 EditCamouflageRegions() {
-    global WindowStateByHwnd
+    global WindowStateByHwnd, g_CamouflageDragOwner
     GetCursorScreenPos(mouseX, mouseY)
     for hwnd, state in WindowStateByHwnd {
         if (!state.camouflageEnabled)
             continue
         if (!state.dragMode)
             continue
+        ; 只让按下时认定的那一个区域跟手：区域重叠时，遍历到的每个 state 都满足
+        ; "鼠标在触发区内"，不设owner 就会两个区域一起被拖走
+        if (g_CamouflageDragOwner && g_CamouflageDragOwner != hwnd)
+            continue
         dx := mouseX - state.dragStartX, dy := mouseY - state.dragStartY
-        if (state.dragMode = "move")
-            state.editX := state.triggerX := state.dragStartLeft + dx, state.editY := state.triggerY := state.dragStartTop + dy
-        else {
+        if (state.dragMode = "move") {
+            newLeft := state.dragStartLeft + dx
+            newTop := state.dragStartTop + dy
+            ClampCamouflageRegion(newLeft, newTop, state.triggerWidth, state.triggerHeight)
+            state.editX := state.triggerX := newLeft
+            state.editY := state.triggerY := newTop
+        } else {
             newLeft := state.dragStartLeft
             newTop := state.dragStartTop
             newWidth := state.dragStartWidth
@@ -974,6 +1174,7 @@ EditCamouflageRegions() {
                     newTop := state.dragStartTop + state.dragStartHeight - 30
                 newHeight := 30
             }
+            ClampCamouflageRegion(newLeft, newTop, newWidth, newHeight)
             state.editX := state.triggerX := newLeft
             state.editY := state.triggerY := newTop
             state.editWidth := state.triggerWidth := newWidth
@@ -984,9 +1185,10 @@ EditCamouflageRegions() {
 }
 
 ReleaseCamouflageRegions() {
-    global WindowStateByHwnd
+    global WindowStateByHwnd, g_CamouflageDragOwner
     for hwnd, state in WindowStateByHwnd
         state.dragMode := ""
+    g_CamouflageDragOwner := 0
 }
 
 RevealCamouflageWindow(hwnd, activate := false) {
@@ -1004,8 +1206,8 @@ RevealCamouflageWindow(hwnd, activate := false) {
         WinSet, Transparent, Off, ahk_id %hwnd%
     else
         WinSet, Transparent, %opacity%, ahk_id %hwnd%
-    if (state.alwaysOnTop)
-        WinSet, AlwaysOnTop, On, ahk_id %hwnd%
+    ; 置顶不在这里补：最小化/还原不会丢 WS_EX_TOPMOST，系统自己会保持。
+    ; 按 state 补反而有害——state 一旦过期，就会把用户已经取消的置顶又钉回去。
     state.camouflageHidden := false
     state.hideAt := 0
     state.revealTick := A_TickCount
@@ -1019,6 +1221,7 @@ RevealCamouflageWindow(hwnd, activate := false) {
 
 CheckCamouflageWindows() {
     global WindowStateByHwnd, g_CamouflageGuiHwnds, g_RadialPreviewHwnd
+    global g_CamouflageDragOwner, g_CamouflageWindowPad
 
     GetCursorScreenPos(mouseX, mouseY)
     foregroundHwnd := DllCall("GetForegroundWindow", "Ptr")
@@ -1031,6 +1234,10 @@ CheckCamouflageWindows() {
         }
         if (hwnd = g_RadialPreviewHwnd) {
             state.hideAt := 0
+            ; 轮盘预览会绕过 RevealCamouflageWindow 直接把窗口 WinRestore 出来，
+            ; 这条分支又提前 continue、走不到下面的可见性判定：不在这里单独收一次，
+            ; 预览画面上就会留着那块蓝斑。（未启用迷彩的窗口没有区域，此调用自然空转）
+            SetCamouflageRegionVisible(hwnd, state, false)
             continue
         }
         PreserveTargetWindowSize(hwnd)
@@ -1045,17 +1252,26 @@ CheckCamouflageWindows() {
         if (!state.camouflageHidden)
             UpdateCamouflageTrigger(hwnd)
         if (IsCamouflageEditKeyDown()) {
+            ; 编辑态例外：窗口开着也得看得见区域才好挪，否则只能凭记忆拖一块隐形矩形。
+            ; 顺序不能反——WinSet,ExStyle 同样找不到隐藏窗口，得先让它露出来再摘点击穿透。
+            SetCamouflageRegionVisible(hwnd, state, true)
             SetCamouflageRegionClickThrough(hwnd, state, false)
-            if (!state.dragMode && GetKeyState("LButton", "P") && insideTrigger)
+            ; 归属标记决定这一轮拖动由谁负责：先按下的那个区域独占，别的一律不跟手
+            if (!g_CamouflageDragOwner && !state.dragMode && GetKeyState("LButton", "P") && insideTrigger) {
+                g_CamouflageDragOwner := hwnd
                 CamouflageRegionMouseDown(hwnd, mouseX, mouseY)
+            }
             continue
         }
+        ; 同理：先在还看得见的时候把点击穿透补回去，再决定要不要藏
         SetCamouflageRegionClickThrough(hwnd, state, true)
+        ; 窗口已呼出时藏起触发区：留着它会在画面上盖一层蓝斑
+        SetCamouflageRegionVisible(hwnd, state, state.camouflageHidden || IsCamouflageRegionTweaking(hwnd))
         if (state.camouflageHidden && insideTrigger) {
             RevealCamouflageWindow(hwnd, true)
         } else if (!state.camouflageHidden) {
             WinGetPos, wx, wy, ww, wh, ahk_id %hwnd%
-            insideWindow := mouseX >= wx - 8 && mouseX <= wx + ww + 8 && mouseY >= wy - 8 && mouseY <= wy + wh + 8
+            insideWindow := mouseX >= wx - g_CamouflageWindowPad && mouseX <= wx + ww + g_CamouflageWindowPad && mouseY >= wy - g_CamouflageWindowPad && mouseY <= wy + wh + g_CamouflageWindowPad
             insideMenu := IsWindowMenuHoverArea(hwnd, mouseX, mouseY)
             hasFocus := (foregroundHwnd = hwnd)
             ; 呼出时我们会顺手 WinActivate，所以"是前台"并不等于"用户在用它"：
@@ -1092,6 +1308,8 @@ CheckCamouflageWindows() {
         } else {
             WinGetPos, targetX, targetY, targetW, targetH, ahk_id %menuTarget%
             overTarget := mouseX >= targetX && mouseX <= targetX + targetW && mouseY >= targetY && mouseY <= targetY + targetH
+            ; 目标窗口被拖走后整条要跟上，否则它会留在原地、连过道都对不上
+            FollowWindowMenuTarget(mouseX, mouseY)
             if (overTarget || IsWindowMenuHoverArea(menuTarget, mouseX, mouseY)) {
                 g_WindowMenuHideAt := 0
             } else if (!g_WindowMenuHideAt) {
@@ -1152,11 +1370,15 @@ IsWindowMenuHoverArea(hwnd, mouseX, mouseY) {
 ;    x14         x196   x216       x338 x358   x462 x482            x688
 ;
 ; 三条硬规则：
-;   1. 控件顶边只允许取 y28 或 y60，行高统一 26，否则同一行会出现视觉错位。
+;   1. 交互控件（滑块、按钮、下拉框、复选框）顶边只允许取 y28 或 y60，行高统一 26，
+;      否则同一行会出现视觉错位。例外只有两处，都写在明面上：
+;        · 「锁定比例」和右上角「×」在标题行 y6（它们属于标题行，不是控件行）；
+;        · 下拉框用 y30 —— 它的高度由字体决定，h 选项无效，只能靠 y 让它视觉居中。
 ;   2. 列的左边界只允许取 x14 / x216 / x358 / x482；分隔线固定在 x206 / x348 / x472
 ;      （即相邻两列边界的正中）。挪动列宽时必须同步挪分隔线。
 ;   3. 字体分三级依次落笔：标题 s8 暗 → 控件 s9 白 → 次要读数 s8 更暗。
 ;      AHK v1 的 Gui,Font 是"当前状态"，后续 Add 全部继承，所以顺序不能打乱。
+;      次要读数（"100%""1920 px""240 × 135"）贴着控件底边取 y33 / y64，不属于上面第 1 条。
 ;
 ; 整条与目标窗口之间的缝隙统一走 g_WindowMenuGap，不要在这里写字面量：
 ; 缝隙同时被鼠标保活的命中测试消费（过道，见 IsPointInMenuHoverArea），
@@ -1167,11 +1389,69 @@ IsWindowMenuHoverArea(hwnd, mouseX, mouseY) {
 ;     所以 w/h 继续给逻辑值交给 AHK 缩放，而一切定位数学（居中、翻转、工作区钳制）
 ;     必须用 menuPhysicalWidth/Height 这对物理尺寸来算——它们和 WinGetPos/SysGet 同一坐标系。
 ; -------------------------------------------------------
+
+; 算整条该落在哪：默认贴目标窗口正上方居中，顶部空间不够就翻到下方，
+; 最后整体收进目标窗口所在显示器的工作区，避免被屏幕边缘截断。
+;
+; 抽成函数是因为它有两个调用点：新建整条时的初始定位，以及目标窗口移动后的跟随。
+; 跟随绝不能靠重建整条来做——重建会重新采样 resizeBaseWidth/Height，
+; 把已经缩放过的窗口的当前尺寸当成新的 100% 基准，滑块就会跳回 100。
+ComputeWindowMenuPos(hwnd, ByRef menuX, ByRef menuY, ByRef menuPhysicalWidth, ByRef menuPhysicalHeight) {
+    global g_WindowMenuWidth, g_WindowMenuHeight, g_WindowMenuGap
+
+    menuPhysicalWidth := Round(g_WindowMenuWidth * A_ScreenDPI / 96)
+    menuPhysicalHeight := Round(g_WindowMenuHeight * A_ScreenDPI / 96)
+
+    WinGetPos, x, y, width, height, ahk_id %hwnd%
+    SysGet, targetMonitor, Monitor, ahk_id %hwnd%
+    SysGet, workArea, MonitorWorkArea, %targetMonitor%
+
+    menuX := x + Round((width - menuPhysicalWidth) / 2)
+    menuY := y - menuPhysicalHeight - g_WindowMenuGap
+    if (menuY < workAreaTop)
+        menuY := y + height + g_WindowMenuGap
+    menuX := Max(workAreaLeft, Min(menuX, workAreaRight - menuPhysicalWidth))
+    menuY := Max(workAreaTop, Min(menuY, workAreaBottom - menuPhysicalHeight))
+}
+
+; 目标窗口被移动/缩放后让整条跟上，而不是把整条留在原地。
+; 只在窗口左上角真的变了才动，且鼠标正停在整条上时不动 —— 那多半是在拖滑块。
+FollowWindowMenuTarget(mouseX, mouseY) {
+    global g_WindowMenuOpen, g_WindowMenuTargetHwnd, g_WindowMenuHwnd
+    global g_WindowMenuTargetX, g_WindowMenuTargetY, g_WindowMenuHoverPad
+
+    if (!g_WindowMenuOpen || !g_WindowMenuTargetHwnd || !g_WindowMenuHwnd)
+        return
+    if (!WinExist("ahk_id " . g_WindowMenuTargetHwnd) || !WinExist("ahk_id " . g_WindowMenuHwnd))
+        return
+
+    WinGetPos, x, y,,, ahk_id %g_WindowMenuTargetHwnd%
+    if (x = g_WindowMenuTargetX && y = g_WindowMenuTargetY)
+        return
+    g_WindowMenuTargetX := x, g_WindowMenuTargetY := y
+
+    WinGetPos, menuX, menuY, menuWidth, menuHeight, ahk_id %g_WindowMenuHwnd%
+    if (mouseX >= menuX - g_WindowMenuHoverPad && mouseX <= menuX + menuWidth + g_WindowMenuHoverPad
+        && mouseY >= menuY - g_WindowMenuHoverPad && mouseY <= menuY + menuHeight + g_WindowMenuHoverPad)
+        return
+
+    newX := 0, newY := 0, physicalWidth := 0, physicalHeight := 0
+    ComputeWindowMenuPos(g_WindowMenuTargetHwnd, newX, newY, physicalWidth, physicalHeight)
+    WinMove, ahk_id %g_WindowMenuHwnd%,, %newX%, %newY%
+}
+
 ShowWindowMenu(hwnd) {
-    global g_WindowMenuOpen, g_WindowMenuHwnd, g_WindowMenuGap, UI_WindowOpacity, UI_WindowMenuBind, UI_WindowWidthScale, UI_WindowHeightScale, UI_WindowAspectLocked, UI_WindowTopmost, UI_WindowCamouflage, WindowOpacityValue, WindowMenuWidthValue, WindowMenuHeightValue, WindowMenuTriggerValue, WindowMenuBindHint
+    global g_WindowMenuOpen, g_WindowMenuHwnd, g_WindowMenuTargetX, g_WindowMenuTargetY, UI_WindowOpacity, UI_WindowMenuBind, UI_WindowWidthScale, UI_WindowHeightScale, UI_WindowAspectLocked, UI_WindowTopmost, UI_WindowCamouflage, WindowOpacityValue, WindowMenuWidthValue, WindowMenuHeightValue, WindowMenuTriggerValue, WindowMenuBindHint
 
     DestroyWindowMenu()
     state := EnsureWindowState(hwnd)
+    ; 新开的控制条从"没有尺寸锁"开始：尺寸锁只在用户真的拖了宽高滑块之后才建立。
+    ; 不重置的话，上一次遗留的 preserveWidth/Height 会在开条瞬间把窗口拽回旧尺寸。
+    state.preserveSize := false
+    state.preservePending := false
+    ; 复选框要显示窗口的真实状态，不能拿 state 当现状：
+    ; 用户可能刚用 Alt+T 置顶过，那时 state.alwaysOnTop 还没被更新
+    SyncWindowTopmostState(hwnd)
     WinGetPos, x, y, width, height, ahk_id %hwnd%
     ; 以当前尺寸作为宽高滑块 100% 的基准。只在整条新建时采样一次：
     ; 状态变更若走重建，这里会被反复重新采样，导致已缩放的窗口把当前尺寸误当成新基准。
@@ -1179,27 +1459,12 @@ ShowWindowMenu(hwnd) {
     state.resizeBaseHeight := height
     if (state.aspectRatioLocked)
         state.aspectRatio := width / height
-    menuWidth := 704, menuHeight := 100
-    ; 整条落到屏幕上的真实尺寸（125% 下是 880×125）。此前定位数学直接用 704×100，
-    ; 于是整条比目标窗口中心右偏 88px、底边压住目标顶部 17px，钳制也漏掉右/下各 176/25px。
-    menuPhysicalWidth := Round(menuWidth * A_ScreenDPI / 96)
-    menuPhysicalHeight := Round(menuHeight * A_ScreenDPI / 96)
     opacityPercent := Round(state.opacity / 2.55)
-    ; 默认贴在目标窗口正上方居中
-    menuX := x + Round((width - menuPhysicalWidth) / 2)
-    menuY := y - menuPhysicalHeight - g_WindowMenuGap
-
-    ; 顶部空间不够时翻到窗口下方，再整体收进工作区，避免整条被屏幕边缘截断
-    SysGet, targetMonitor, Monitor, ahk_id %hwnd%
-    SysGet, workArea, MonitorWorkArea, %targetMonitor%
-    workLeft := workAreaLeft
-    workTop := workAreaTop
-    workRight := workAreaRight
-    workBottom := workAreaBottom
-    if (menuY < workTop)
-        menuY := y + height + g_WindowMenuGap
-    menuX := Max(workLeft, Min(menuX, workRight - menuPhysicalWidth))
-    menuY := Max(workTop, Min(menuY, workBottom - menuPhysicalHeight))
+    ; ByRef 的输出变量先给出初值再传：AHK v1 里传一个尚未存在的变量时，
+    ; 函数内的赋值不保证回写（实测过"传进去、读出来还是空"），显式初始化最稳
+    menuX := 0, menuY := 0, menuPhysicalWidth := 0, menuPhysicalHeight := 0
+    ComputeWindowMenuPos(hwnd, menuX, menuY, menuPhysicalWidth, menuPhysicalHeight)
+    g_WindowMenuTargetX := x, g_WindowMenuTargetY := y
     Gui, WindowMenu:+AlwaysOnTop -Caption +ToolWindow +HwndWindowMenuHwnd
     g_WindowMenuHwnd := WindowMenuHwnd
     Gui, WindowMenu:Color, 202833
@@ -1258,26 +1523,26 @@ ShowWindowMenu(hwnd) {
     Gui, WindowMenu:Add, Text, x216 y64 w122 Center vWindowMenuTriggerValue, % state.triggerWidth . " × " . state.triggerHeight
     Gui, WindowMenu:Add, Text, x358 y64 w104 Center vWindowMenuBindHint, % occupiedKeys != "" ? "已占用 " . occupiedKeys : ""
 
-    Gui, WindowMenu:Show, NoActivate x%menuX% y%menuY% w%menuWidth% h%menuHeight%
+    Gui, WindowMenu:Show, NoActivate x%menuX% y%menuY% w%g_WindowMenuWidth% h%g_WindowMenuHeight%
     WinSet, Transparent, 235, ahk_id %WindowMenuHwnd%
     g_WindowMenuOpen := true
 }
 
-RefreshWindowMenu() {
-    global g_WindowMenuTargetHwnd, g_WindowMenuOpen
-    ; 仅在需要重新定位整条时使用；日常状态变更请用 UpdateWindowMenu* 系列做增量刷新，
-    ; 因为重建会重新采样 resizeBaseWidth/Height，导致宽高滑块基准被打断。
-    if (g_WindowMenuOpen && g_WindowMenuTargetHwnd && WinExist("ahk_id " . g_WindowMenuTargetHwnd))
-        ShowWindowMenu(g_WindowMenuTargetHwnd)
-}
-
 DestroyWindowMenu() {
-    global g_WindowMenuOpen, g_WindowMenuHwnd, g_WindowMenuHideAt
+    global g_WindowMenuOpen, g_WindowMenuHwnd, g_WindowMenuHideAt, g_WindowMenuTargetHwnd
+    global WindowStateByHwnd
+
     Gui, WindowMenu:Destroy
     g_WindowMenuOpen := false
     g_WindowMenuHwnd := 0
     ; 清掉待收计时，否则下次呼出会继承上一次的截止时间，刚弹出就被收掉
     g_WindowMenuHideAt := 0
+    ; 关掉控制条就解除"尺寸保持"：那套机制只服务于"正在调参"的这段时间，
+    ; 留着它会让窗口此后永远无法被手动缩放、也进不了全屏（见 PreserveTargetWindowSize）
+    if (g_WindowMenuTargetHwnd && WindowStateByHwnd.HasKey(g_WindowMenuTargetHwnd)) {
+        WindowStateByHwnd[g_WindowMenuTargetHwnd].preserveSize := false
+        WindowStateByHwnd[g_WindowMenuTargetHwnd].preservePending := false
+    }
 }
 
 IsScriptGui(hwnd) {
@@ -1290,7 +1555,7 @@ IsScriptGui(hwnd) {
 ; =======================================================
 RadialHandler:
     global g_RadialOpen, g_RadialCenterX, g_RadialCenterY, g_RadialSelected
-    global g_RadialItems, g_RadialDeadZone, RadialPhysicalKey
+    global g_RadialItems
 
     if (g_RadialOpen)
         return
@@ -1305,16 +1570,13 @@ RadialHandler:
     GetCursorScreenPos(g_RadialOriginX, g_RadialOriginY)
     g_RadialCenterX := g_RadialOriginX + g_RadialOffsetX
     g_RadialCenterY := g_RadialOriginY + g_RadialOffsetY
-    g_RadialVirtualX := g_RadialCenterX
-    g_RadialVirtualY := g_RadialCenterY
-    g_RadialLastMouseX := g_RadialOriginX
-    g_RadialLastMouseY := g_RadialOriginY
     g_RadialSelected := 0
     g_RadialOpen := true
     ShowRadialMenu()
     SetTimer, RadialSelectionTimer, 16
     radialPhysicalKey := RegExReplace(A_ThisHotkey, "^[\^\!\+\#\<\>\*\$~]+", "")
-    KeyWait, %radialPhysicalKey%
+    ; 超时只是保险：万一 up 事件丢了，菜单不该永远挂在屏幕上（g_RadialOpen 会一直为真）
+    KeyWait, %radialPhysicalKey%, T60
     SetTimer, RadialSelectionTimer, Off
     if (!g_RadialSelected)
         UpdateRadialPreview(0)
@@ -1322,8 +1584,12 @@ RadialHandler:
     g_RadialOpen := false
 
     if (g_RadialSelected) {
+        ; 预览为了浮在轮盘之上，把窗口临时推成了 TOPMOST（SetWindowPos 会真的设置 WS_EX_TOPMOST）。
+        ; 提交时要按预览前记下的真实状态收尾：本来不是置顶的才摘掉，
+        ; 本来就是用户钉住的就保持不动 —— 否则从轮盘切过去会把置顶弄丢。
+        commitWasTopmost := g_RadialPreviewWasTopmost
         CommitRadialPreview()
-        ActivateRadialWindow(g_RadialItems[g_RadialSelected].key)
+        ActivateRadialWindow(g_RadialItems[g_RadialSelected].key, commitWasTopmost)
     }
 return
 
@@ -1390,12 +1656,15 @@ ShowRadialMenu() {
     global g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds
     global g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
     global RadialAppControlHwnd, RadialCenterControlHwnd, RadialIconControlHwnd
+    global g_RadialHighlighted
 
     DestroyRadialMenu()
     g_RadialSectorHwnds := []
     g_RadialSectorLabelHwnds := []
     g_RadialSectorIconHwnds := []
     g_RadialLabelGuiNames := []
+    ; 扇区全部以普通色新建，所以此刻没有任何扇区处于高亮态
+    g_RadialHighlighted := 0
     diameter := (g_RadialOuterRadius + g_RadialMenuPadding) * 2
     menuX := g_RadialCenterX - Floor(diameter / 2)
     menuY := g_RadialCenterY - Floor(diameter / 2)
@@ -1410,8 +1679,13 @@ ShowRadialMenu() {
         CreateRadialSector(sectorIndex, menuX, menuY, diameter, center, startAngle, sweepAngle, g_RadialNormalColor)
     }
 
-    centerX := g_RadialCenterX - Floor(g_RadialPreviewWidth / 2)
-    centerY := g_RadialCenterY - Floor(g_RadialPreviewHeight / 2)
+    ; 中心预览框的定位同样要用物理尺寸：AHK 只把 w/h 按 DPI 放大，x/y 原样传下去，
+    ; 所以"居中"必须拿放大后的尺寸算，否则框心会偏离 g_RadialCenterX/Y。
+    ; Region 也是物理像素，一并按物理尺寸裁，框内的控件（会被放大）才不会被裁掉一角。
+    previewPhysicalWidth := Round(g_RadialPreviewWidth * A_ScreenDPI / 96)
+    previewPhysicalHeight := Round(g_RadialPreviewHeight * A_ScreenDPI / 96)
+    centerX := g_RadialCenterX - Floor(previewPhysicalWidth / 2)
+    centerY := g_RadialCenterY - Floor(previewPhysicalHeight / 2)
     Gui, RadialCenter:Destroy
     Gui, RadialCenter:+AlwaysOnTop -Caption +ToolWindow +LastFound +E0x20
     g_RadialHwnd := WinExist()
@@ -1432,7 +1706,7 @@ ShowRadialMenu() {
     g_RadialCenterControlHwnd := RadialCenterControlHwnd
     GuiControl, RadialCenter:Hide, %g_RadialIconControlHwnd%
     Gui, RadialCenter:Show, NoActivate x%centerX% y%centerY% w%g_RadialPreviewWidth% h%g_RadialPreviewHeight%
-    WinSet, Region, 0-0 w%g_RadialPreviewWidth% h%g_RadialPreviewHeight% R8-8, ahk_id %g_RadialHwnd%
+    WinSet, Region, 0-0 w%previewPhysicalWidth% h%previewPhysicalHeight% R8-8, ahk_id %g_RadialHwnd%
     WinSet, Transparent, 245, ahk_id %g_RadialHwnd%
 
     Loop, %itemCount% {
@@ -1472,8 +1746,12 @@ CreateRadialLabel(index, menuX, menuY, diameter, center, startAngle, sweepAngle)
     labelAngle := (startAngle + sweepAngle / 2) * 0.017453292519943
     labelCenterX := Round(menuX + center + Cos(labelAngle) * labelRadius)
     labelCenterY := Round(menuY + center + Sin(labelAngle) * labelRadius)
-    labelX := Round(labelCenterX - labelWidth / 2)
-    labelY := Round(labelCenterY - labelHeight / 2)
+    ; 标签框要"以 labelCenter 为中心"，就得按放大后的物理尺寸反推左上角：
+    ; 请求的 w/h 会被 AHK 按 DPI 放大，而 x/y 不会，照逻辑尺寸算会让标签整体右下偏移
+    physicalLabelWidth := Round(labelWidth * A_ScreenDPI / 96)
+    physicalLabelHeight := Round(labelHeight * A_ScreenDPI / 96)
+    labelX := Round(labelCenterX - physicalLabelWidth / 2)
+    labelY := Round(labelCenterY - physicalLabelHeight / 2)
     iconSize := itemCount <= 4 ? 20 : 16
     iconY := Floor((labelHeight - iconSize) / 2)
 
@@ -1530,26 +1808,6 @@ SetPolygonWindowRegion(hwnd, points) {
     DllCall("SetWindowRgn", "Ptr", hwnd, "Ptr", region, "Int", true)
 }
 
-CalibrateRadialLayers(menuX, menuY, diameter) {
-    global g_RadialCenterX, g_RadialCenterY, g_RadialSectorHwnds, g_RadialHwnd
-
-    firstSectorHwnd := g_RadialSectorHwnds[1]
-    WinGetPos, actualX, actualY, actualW, actualH, ahk_id %firstSectorHwnd%
-    actualCenterX := actualX + actualW / 2
-    actualCenterY := actualY + actualH / 2
-    offsetX := Round(g_RadialCenterX - actualCenterX)
-    offsetY := Round(g_RadialCenterY - actualCenterY)
-
-    Loop, % g_RadialSectorHwnds.Length() {
-        hwnd := g_RadialSectorHwnds[A_Index]
-        WinGetPos, x, y,,, ahk_id %hwnd%
-        MoveWindowBy(hwnd, x + offsetX, y + offsetY)
-    }
-
-    WinGetPos, centerX, centerY,,, ahk_id %g_RadialHwnd%
-    MoveWindowBy(g_RadialHwnd, centerX + offsetX, centerY + offsetY)
-}
-
 MoveWindowBy(hwnd, x, y) {
     DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", 0, "Int", x, "Int", y, "Int", 0, "Int", 0, "UInt", 0x0015)
 }
@@ -1561,9 +1819,12 @@ GetCursorScreenPos(ByRef x, ByRef y) {
     y := NumGet(point, 4, "Int")
 }
 
-SetCursorScreenPos(x, y) {
-    DllCall("SetCursorPos", "Int", x, "Int", y)
-}
+; 说明：这里删掉了两个从未被调用的函数——
+;   CalibrateRadialLayers()：想按实测窗口矩形修正轮盘各层与光标的偏移。实测不需要：
+;     -Caption +ToolWindow 窗口的客户区原点与窗口原点重合（frameOffset = 0,0），
+;     而 Region 用的正是窗口坐标，所以 menuX + center 恰好落在 g_RadialCenterX 上，
+;     环本身就自洽。删掉是为了不留"以为有校准"的错觉。
+;   SetCursorScreenPos()：只有 GetCursorScreenPos 有实际调用方。
 
 KeepRadialMenuOnTop() {
     global g_RadialHwnd, g_RadialSectorHwnds, g_RadialLabelGuiNames
@@ -1721,13 +1982,18 @@ RestoreRadialPreview() {
     g_RadialPreviewWasTopmost := false
 }
 
+; 只重绘"上一次高亮"和"这一次高亮"两个扇区。
+; 之前每换一次选择就把 N 个扇区窗口全部 Gui,Color + WinSet,Transparent 一遍，
+; 9 个窗口各重绘一次纯属白烧——真正变色的只有离开的那个和进入的那个。
 UpdateRadialHighlight() {
-    global g_RadialItems, g_RadialSelected, g_RadialSectorHwnds
+    global g_RadialItems, g_RadialSelected, g_RadialHighlighted, g_RadialSectorHwnds
     global g_RadialSectorLabelHwnds, g_RadialSectorIconHwnds, g_RadialLabelGuiNames
     global g_RadialAppControlHwnd, g_RadialCenterControlHwnd, g_RadialIconControlHwnd
     global g_RadialNormalColor, g_RadialSelectedColor
 
     Loop, % g_RadialItems.Length() {
+        if (A_Index != g_RadialSelected && A_Index != g_RadialHighlighted)
+            continue
         guiName := "RadialSector" . A_Index
         color := (A_Index == g_RadialSelected) ? g_RadialSelectedColor : g_RadialNormalColor
         Gui, %guiName%:Color, %color%
@@ -1745,6 +2011,7 @@ UpdateRadialHighlight() {
             GuiControl, %labelGui%: +cD8DEE9, %iconHwnd%
         }
     }
+    g_RadialHighlighted := g_RadialSelected
 
     if (g_RadialSelected) {
         item := g_RadialItems[g_RadialSelected]
@@ -1760,7 +2027,7 @@ UpdateRadialHighlight() {
     }
 }
 
-ActivateRadialWindow(key) {
+ActivateRadialWindow(key, previewWasTopmost := false) {
     global WindowBindings, WindowIsOverlaid
 
     hwnd := WindowBindings[key]
@@ -1775,7 +2042,9 @@ ActivateRadialWindow(key) {
     WinGet, minMaxState, MinMax, ahk_id %hwnd%
     if (minMaxState == -1)
         WinRestore, ahk_id %hwnd%
-    WinSet, AlwaysOnTop, Off, ahk_id %hwnd%
+    ; 只收掉"预览期间临时加的"置顶；用户自己钉住的窗口保持钉住
+    if (!previewWasTopmost)
+        SetWindowTopmost(hwnd, false)
     WinActivate, ahk_id %hwnd%
     ShowOSD("窗口已激活: [" . GetDisplayName(key) . "]")
 }
@@ -1783,14 +2052,24 @@ ActivateRadialWindow(key) {
 ; =======================================================
 ; 8. 绑定、解绑与核心触发路由
 ; =======================================================
+; 三个处理器都要挡掉脚本自己的 GUI：控制条是可激活的普通 ToolWindow，
+; 点一下滑块它就成了前台窗口，这时按绑定键会把控制条自己绑成"窗口"。
+; 只挡 Bind/Trigger 不够 —— 置顶同样会把控制条钉在最上层。
 BindHandler:
     KeyName := RegExReplace(A_ThisHotkey, "^[\^\!\+\*\$]+", "")
     WinGet, currentHwnd, ID, A
+    if (!currentHwnd || IsScriptGui(currentHwnd)) {
+        ShowOSD("请选择一个普通应用窗口再绑定")
+        return
+    }
     WindowBindings[KeyName] := currentHwnd
     WindowIsOverlaid[KeyName] := false  
     
-    WinSet, Transparent, 255, ahk_id %currentHwnd% 
-    WinSet, AlwaysOnTop, Off, ahk_id %currentHwnd%
+    ; 走统一的 setter，而不是直接 WinSet：
+    ; Transparent 255 会留下 WS_EX_LAYERED（Chromium 系窗口掉帧），且不更新 state.opacity，
+    ; 于是下次开控制条滑块显示的百分比会与实际不符
+    SetWindowOpacity(currentHwnd, 255)
+    SetWindowTopmost(currentHwnd, false)
     ShowOSD("✅ 成功绑定当前窗口至: [" . GetDisplayName(KeyName) . "] ")
 return
 
@@ -1827,28 +2106,33 @@ TriggerHandler:
         WinGet, minMaxState, MinMax, ahk_id %targetHwnd%
         RestoreData_MinMax[KeyName] := minMaxState
         RestoreData_Above[KeyName] := GetRealNativeAnchor(targetHwnd)
+        ; 置顶状态也要先记下来：下面为了让"沉到锚点下方"生效必须摘掉置顶，
+        ; 但摘掉之后如果没人负责还原，用户用 Alt+T 钉住的窗口会在这里永久失去置顶
+        RestoreData_Topmost[KeyName] := SyncWindowTopmostState(targetHwnd)
         WindowIsOverlaid[KeyName] := true
         
-        WinSet, AlwaysOnTop, Off, ahk_id %targetHwnd%
+        SetWindowTopmost(targetHwnd, false)
         WinActivate, ahk_id %targetHwnd%
         ShowOSD("👀 窗口已呼出: [" . GetDisplayName(KeyName) . "] ")
         
         KeyWait, %KeyName%, T0.3
         if (ErrorLevel) {
-            KeyWait, %KeyName% 
+            ; 加超时：万一 up 事件丢了（钩子被外部工具顶掉等），
+            ; 没有超时就会永远卡在这里，窗口留在"已呼出"状态再也回不去
+            KeyWait, %KeyName%, T60
             RestoreWindow(KeyName)
         }
     } else {
         if (currentActiveHwnd == targetHwnd) {
             RestoreWindow(KeyName)
-            KeyWait, %KeyName% 
+            KeyWait, %KeyName%, T60
         } else {
-            WinSet, AlwaysOnTop, Off, ahk_id %targetHwnd%
+            SetWindowTopmost(targetHwnd, false)
             WinActivate, ahk_id %targetHwnd%
             ShowOSD("👀 再次呼出: [" . GetDisplayName(KeyName) . "] ")
             KeyWait, %KeyName%, T0.3
             if (ErrorLevel) {
-                KeyWait, %KeyName% 
+                KeyWait, %KeyName%, T60
                 RestoreWindow(KeyName)
             }
         }
@@ -1859,10 +2143,13 @@ return
 ; 8. 恢复与原生隔离算法
 ; =======================================================
 RestoreWindow(KeyName) {
+    global RestoreData_Topmost
+
     targetHwnd := WindowBindings[KeyName]
     prevActive := RestoreData_Active[KeyName]
     hwndAbove := RestoreData_Above[KeyName]
     minMaxState := RestoreData_MinMax[KeyName]
+    wasTopmost := RestoreData_Topmost[KeyName]
     
     WindowIsOverlaid[KeyName] := false
     ShowOSD("⬇️ 完美隐藏，已退回底层: [" . GetDisplayName(KeyName) . "] ")
@@ -1876,7 +2163,9 @@ RestoreWindow(KeyName) {
             DllCall("SetWindowPos", "Ptr", targetHwnd, "Ptr", hwndAbove, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x13)
         }
     }
-    WinSet, AlwaysOnTop, Off, ahk_id %targetHwnd%
+    ; 呼出时为了能沉到锚点下方而摘掉了置顶，这里按呼出前记下的状态还原，
+    ; 否则"Alt+T 钉住的窗口"会被呼出/隐藏一轮后永久失去置顶
+    SetWindowTopmost(targetHwnd, wasTopmost ? true : false)
     if (prevActive && prevActive != targetHwnd && WinExist("ahk_id " prevActive)) {
         WinActivate, ahk_id %prevActive%
     }
@@ -1925,8 +2214,21 @@ GetRealNativeAnchor(targetHwnd) {
 ; 9. 界面工具函数与 OSD 引擎
 ; =======================================================
 ; 构建配置界面的下拉菜单项，并自动选中当前配置
+; 当前值若不在候选表里（例如手改 config.ini 写成 # 即 Win 修饰键），
+; 就把它作为额外一项追加进去。否则下拉框会静默显示成第一项，
+; 用户一按"保存并重启"就把自己原来的设置改掉了。
 BuildDDL(currentVal) {
     options := ["! (Alt)", "^ (Ctrl)", "+ (Shift)", "^! (Ctrl+Alt)", "^+ (Ctrl+Shift)"]
+    currentVal := Trim(currentVal)
+
+    hasCurrent := false
+    for k, v in options {
+        if (RegExReplace(v, "\s.*", "") == currentVal)
+            hasCurrent := true
+    }
+    if (currentVal != "" && !hasCurrent)
+        options.Push(currentVal . " (当前值)")
+
     str := ""
     for k, v in options {
         prefix := RegExReplace(v, "\s.*", "")
@@ -1939,35 +2241,224 @@ BuildDDL(currentVal) {
 }
 
 ; 将冰冷的 AHK 代码转化为好看的文本 (如 !1 变成 Alt+1)
+; 复用 FormatHotkey，于是 Win 修饰键、< > 左右键指定也能正确显示，
+; 不再只认那 5 种写死的组合
 GetDisplayName(KeyName) {
     global g_TriggerModifier
-    prefix := g_TriggerModifier
-    if (prefix == "!")
-        prefix := "Alt+"
-    else if (prefix == "^")
-        prefix := "Ctrl+"
-    else if (prefix == "+")
-        prefix := "Shift+"
-    else if (prefix == "^!")
-        prefix := "Ctrl+Alt+"
-    else if (prefix == "^+")
-        prefix := "Ctrl+Shift+"
-    return prefix . KeyName
+    return FormatHotkey(g_TriggerModifier . KeyName)
 }
 
-NormalizeRadialHotkey(hotkey) {
-    hotkey := Trim(hotkey)
-    hotkey := StrReplace(hotkey, "Alt+", "!")
-    hotkey := StrReplace(hotkey, "Ctrl+", "^")
-    hotkey := StrReplace(hotkey, "Shift+", "+")
-    hotkey := StrReplace(hotkey, "Numpad=", "NumpadAdd")
-    hotkey := StrReplace(hotkey, "Numpad-", "NumpadSub")
+; -------------------------------------------------------
+; 快捷键串的归一化、校验与注册
+; -------------------------------------------------------
 
-    if (hotkey = "!+")
-        return "!="
-    if (hotkey = "")
-        return "!="
+; v1 没有 StrLower() 函数（那是 v2 才有的），只有 StringLower 命令，包一层好在表达式里用
+LowerCase(text) {
+    StringLower, text, text
+    return text
+}
+
+; 把用户可能写的 "Alt+="、"Ctrl+Shift+T" 这类写法翻译成 AHK 的修饰符前缀写法。
+;
+; 用 "+" 分词，而不是 StrReplace 替换链：分词之后"哪个是键、哪些是修饰符"是明确的，
+; 不受书写顺序影响；替换链则要靠 "Alt+" 恰好排在 "Ctrl+" 前面这种巧合才对。
+; 翻译不了的写法原样返回，交给 RegisterHotkey 去判断和回退 —— 这里只做翻译，不做取舍。
+NormalizeHotkeySpelling(hotkey) {
+    static modifierSymbols := {"alt": "!", "ctrl": "^", "shift": "+", "win": "#"}
+
+    hotkey := Trim(hotkey)
+    if (!InStr(hotkey, "+"))
+        return hotkey
+    parts := StrSplit(hotkey, "+")
+    if (parts.Length() < 2)
+        return hotkey
+
+    symbols := ""
+    for index, part in parts {
+        if (index = parts.Length())
+            break
+        name := LowerCase(Trim(part))
+        if (!modifierSymbols.HasKey(name))
+            return hotkey
+        symbols .= modifierSymbols[name]
+    }
+    keyPart := Trim(parts[parts.Length()])
+    if (keyPart = "")
+        return hotkey
+    return symbols . keyPart
+}
+
+; 剥掉前导的修饰符与注册前缀符号，取出键名部分
+StripHotkeyModifiers(hotkey) {
+    return RegExReplace(Trim(hotkey), "^[\#\^\!\+\<\>\*\$~]+")
+}
+
+; 键名部分是否为空、或只是一个裸修饰符。
+; AHK 允许注册 "!" 这种裸修饰符热键（v1.1.37 实测注册成功），但本脚本要用 KeyWait
+; 等它抬起，PreviewPhysicalKey 会因此变成空串 —— 于是热键按下的那一刻才炸。
+; 所以这类值必须在这里就判为非法，而不是让它注册成功后死在运行期。
+IsBareModifierHotkey(hotkey) {
+    static bareNames := " alt ctrl shift lalt ralt lctrl rctrl lshift rshift lwin rwin win "
+
+    keyPart := LowerCase(StripHotkeyModifiers(hotkey))
+    if (keyPart = "")
+        return true
+    return InStr(bareNames, " " . keyPart . " ") ? true : false
+}
+
+; 修饰键只允许由 # ^ ! + 组成（可带 < > 指定左右键）。
+; 它是要拼在 1~9 前面成为完整热键的，混进别的字符会拼出意料之外的全局热键。
+IsModifierOnly(str) {
+    str := Trim(str)
+    if (str = "")
+        return false
+    return RegExMatch(str, "^[\#\^\!\+\<\>]+$") ? true : false
+}
+
+; 判断一个键名能不能交给 GetKeyState / KeyWait 用。
+;
+; 实测（v1.1.37）：GetKeyState 对合法键名返回 0/1，对非法名字既不抛错也不报错，
+; 只是返回空串。于是"迷彩编辑抑制键"填错时的症状是"按住键毫无反应"，
+; 没有任何提示可查 —— 所以这里用返回值是否为空来判定，把错误挡在写盘之前。
+; 注意这与 Hotkey 的判定方式不同：Hotkey 对非法键名会抛可捕获异常。
+IsUsableKeyName(name) {
+    name := Trim(name)
+    if (name = "")
+        return false
+    return (GetKeyState(name, "P") = "") ? false : true
+}
+
+SanitizeKeyName(value, fallback, displayName) {
+    if (IsUsableKeyName(value))
+        return value
+    AddStartupWarning(displayName . "「" . (Trim(value) = "" ? "空" : Trim(value)) . "」不是可用键名，已改用 " . fallback)
+    return fallback
+}
+
+SanitizeModifier(value, fallback, displayName) {
+    if (IsModifierOnly(value))
+        return value
+    AddStartupWarning(displayName . "「" . (Trim(value) = "" ? "空" : Trim(value)) . "」不是合法修饰键，已改用 " . fallback)
+    return fallback
+}
+
+; 注册一个全局热键，并保证"配置里的值不能用"只导致降级、不导致崩溃。
+; 返回真正生效的热键串，调用方应当把它写回变量，让配置页显示的就是实际生效的键。
+;
+; 三种结果都要说话，不能只有彻底失败才吭声：
+;   配置值可用        → 静默注册；
+;   配置值不可用、默认值可用 → 注册默认值 + 告警（否则用户会以为自己的设置生效了）；
+;   两个都不可用      → 告警说明该功能本次未启用。
+RegisterHotkey(hotkey, label, fallback := "", prefix := "$*") {
+    configured := NormalizeHotkeySpelling(hotkey)
+    displayValue := (Trim(hotkey) = "" ? "空" : Trim(hotkey))
+
+    effective := TryRegisterHotkey(configured, label, prefix)
+    if (effective = "" && fallback != "")
+        effective := TryRegisterHotkey(fallback, label, prefix)
+
+    if (effective = "")
+        AddStartupWarning(GetHotkeyLabelName(label) . "的快捷键「" . displayValue . "」无法使用，本次未启用")
+    else if (effective != configured)
+        AddStartupWarning(GetHotkeyLabelName(label) . "的快捷键「" . displayValue . "」无效，已改用 " . effective)
+    return effective
+}
+
+TryRegisterHotkey(hotkey, label, prefix) {
+    global g_RegisteredHotkeys
+
+    hotkey := NormalizeHotkeySpelling(hotkey)
+    if (hotkey = "" || IsBareModifierHotkey(hotkey))
+        return ""
+
+    ; 重复注册不会报错，AHK 只会把先注册的标签顶掉，功能就无声消失了 —— 所以自己查重
+    key := LowerCase(hotkey)
+    if (g_RegisteredHotkeys.HasKey(key)) {
+        AddStartupWarning(hotkey . " 与" . GetHotkeyLabelName(g_RegisteredHotkeys[key]) . "重复，已跳过" . GetHotkeyLabelName(label))
+        return ""
+    }
+
+    ; 非法键名会让 Hotkey 命令抛错并终止整个脚本，必须在这里兜住（v1.1.37 实测可捕获）
+    try {
+        Hotkey, % prefix . hotkey, %label%
+    } catch {
+        return ""
+    }
+    g_RegisteredHotkeys[key] := label
     return hotkey
+}
+
+; 告警里要用用户看得懂的功能名，而不是 BindHandler 这样的标签名
+GetHotkeyLabelName(label) {
+    static names := {"BindHandler": "绑定", "UnbindHandler": "解绑", "TriggerHandler": "呼出/隐藏"
+        , "SnapshotHandler": "记录快照", "PreviewHandler": "实时预览", "RadialHandler": "窗口轮盘"
+        , "WindowMenuHandler": "控制条", "PinHandler": "全局置顶", "ShowConfigGUI": "配置页"}
+    return names.HasKey(label) ? names[label] : label
+}
+
+AddStartupWarning(message) {
+    global g_StartupWarnings
+    g_StartupWarnings.Push(message)
+}
+
+JoinText(items, separator) {
+    result := ""
+    for index, item in items
+        result .= (result = "" ? "" : separator) . item
+    return result
+}
+
+; 配置页保存前的形状校验：把"空值 / 裸修饰符"这类明显不能用的写法拦在写盘之前，
+; 免得坏值先进 config.ini，再靠启动时的回退去救。
+; 只做结构判断，不查白名单 —— 白名单会误伤 AHK 支持的冷门键名（如 Media_Play_Pause）。
+ValidateHotkeyInput(value, displayName, ByRef errorMessage) {
+    value := Trim(value)
+    if (value = "") {
+        errorMessage := displayName . "不能为空"
+        return false
+    }
+    if (IsBareModifierHotkey(value)) {
+        errorMessage := displayName . "「" . value . "」只有修饰键、没有主键，无法注册"
+        return false
+    }
+    return true
+}
+
+; 找出配置里互相冲突的快捷键，返回一句人话（无冲突返回空串）。
+;
+; 必须自己查：AHK 对重复注册不报错，只会让后注册的把前一个标签顶掉，
+; 功能就无声消失了（v1.1.37 实测重复注册后 ErrorLevel 仍是 0）。
+; 三组数字键要展开成完整热键再比 —— 冲突的是"修饰键+数字"，不是修饰键本身。
+FindHotkeyConflict(triggerMod, bindMod, unbindMod, pin, snapshot, preview, radial, radialAlt, windowMenu, config) {
+    keys := []
+    for index, digit in ["1", "2", "3", "4", "5", "6", "7", "8", "9"] {
+        keys.Push({hotkey: triggerMod . digit, name: "呼出/隐藏 " . digit})
+        keys.Push({hotkey: bindMod . digit, name: "绑定 " . digit})
+        keys.Push({hotkey: unbindMod . digit, name: "解绑 " . digit})
+    }
+    keys.Push({hotkey: pin, name: "全局置顶"})
+    keys.Push({hotkey: snapshot, name: "记录层级快照"})
+    keys.Push({hotkey: preview, name: "实时预览"})
+    keys.Push({hotkey: radial, name: "主轮盘"})
+    keys.Push({hotkey: radialAlt, name: "备用轮盘"})
+    keys.Push({hotkey: windowMenu, name: "控制条"})
+    keys.Push({hotkey: config, name: "配置页"})
+
+    seen := {}
+    for index, item in keys {
+        hotkey := NormalizeHotkeySpelling(item.hotkey)
+        if (hotkey = "")
+            continue
+        key := LowerCase(hotkey)
+        if (seen.HasKey(key)) {
+            ; 备用轮盘与主轮盘相同是合法配置：脚本对相同值会跳过备用轮盘的注册
+            if (item.name = "备用轮盘" && seen[key] = "主轮盘")
+                continue
+            return hotkey . " 同时被「" . seen[key] . "」和「" . item.name . "」占用"
+        }
+        seen[key] := item.name
+    }
+    return ""
 }
 
 NormalizeColor(color, fallback) {
@@ -1999,13 +2490,30 @@ GetWindowIcon(hwnd) {
     return icon
 }
 
-; 把底层特殊键格式化成能看懂的人话
+; 把底层特殊键格式化成能看懂的人话。
+;
+; 必须按前导修饰符逐字符解析，不能写成 StrReplace 链：先把 "^" 换成 "Ctrl+"、
+; 再把 "+" 换成 "Shift+"，第二步会把第一步刚生成的那个 "+" 一起换掉，
+; 于是 "^!vkC0" 会变成 "CtrlShift+AltShift+·(波浪号)"。
 FormatHotkey(hk) {
-    hk := StrReplace(hk, "vkC0", "·(波浪号)")
-    hk := StrReplace(hk, "^", "Ctrl+")
-    hk := StrReplace(hk, "!", "Alt+")
-    hk := StrReplace(hk, "+", "Shift+")
-    return hk
+    static modifierNames := {"#": "Win+", "^": "Ctrl+", "!": "Alt+", "+": "Shift+"}
+    static prefixSymbols := "$*~<>"
+
+    hk := Trim(hk)
+    text := ""
+    keyStart := StrLen(hk) + 1
+    Loop, % StrLen(hk) {
+        char := SubStr(hk, A_Index, 1)
+        if (InStr(prefixSymbols, char))
+            continue
+        if (modifierNames.HasKey(char)) {
+            text .= modifierNames[char]
+            continue
+        }
+        keyStart := A_Index
+        break
+    }
+    return text . RegExReplace(SubStr(hk, keyStart), "i)^vkC0$", "·(波浪号)")
 }
 
 ShowOSD(Message, Duration := 1500) {
