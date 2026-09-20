@@ -119,8 +119,7 @@ RecomputeRadialMetrics()
 ;   命中区仍用 g_RadialInnerRadius ~ g_RadialOuterRadius 这一整圈（内径 0.645R），
 ;   因为视觉变细不等于要用户瞄得更准 —— 鼠标只要落在扇区方向上就该选中。
 ;   视觉只画 g_RadialBandInner ~ g_RadialBandOuter 这条薄带，看起来轻得多。
-; 环带两端做圆头端帽（见 BuildArcBandPoints）：相邻扇区之间就是"设计过的缺口"，
-; 而不是切歪的直角。
+; 每条扇区的两条边是直的径线（饼图那种分块），扇区之间留 g_RadialGapDegrees 的缺口。
 ;
 ; 全部几何都从 g_RadialOuterRadius 推导，集中在这里算一次：
 ; 环的大小只有一个来源，改了 RadialSize 重新调用即可（测试台就是这么验小尺寸排版的）。
@@ -1825,10 +1824,12 @@ CreateRadialSector(index, menuX, menuY, diameter, center, startAngle, sweepAngle
     Gui, %guiName%:Color, %color%
     Gui, %guiName%:Show, NoActivate x%menuX% y%menuY% w%diameter% h%diameter%
 
+    ; 两种样式形状相同（都是直边环形扇区），只是内外半径不同：
+    ; 环带画在 0.72R~0.96R 之间，实心扇区画满 0.645R~R
     if (g_RadialStyle = "Wedge")
         points := BuildAnnularSectorPoints(center, g_RadialOuterRadius, g_RadialInnerRadius, startAngle, sweepAngle)
     else
-        points := BuildArcBandPoints(center, g_RadialBandInner, g_RadialBandOuter, startAngle, sweepAngle)
+        points := BuildAnnularSectorPoints(center, g_RadialBandOuter, g_RadialBandInner, startAngle, sweepAngle)
     SetPolygonWindowRegion(sectorHwnd, points)
     g_RadialSectorHwnds.Push(sectorHwnd)
     WinSet, Transparent, 225, ahk_id %sectorHwnd%
@@ -1984,57 +1985,17 @@ IsWideChar(char) {
     return (Asc(char) >= 0x2E80) ? true : false
 }
 
-; 生成"薄环带 + 两端圆头端帽"的闭合多边形，用于 SetWindowRgn。
+; 生成环形扇区（饼图切片）的闭合多边形：外弧 → 沿半径的直线边 → 内弧 → 另一条直线边。
+; 环带与实心扇区都走这一个函数，只是内外半径不同。
 ;
-; 为什么要有圆头：直角端看起来像"切歪了"，圆头（capsule）让相邻扇区之间那道
-; g_RadialGapDegrees 的缺口变成设计的一部分。
+; 两条边是**直的径线**，这是刻意的：早先版本给环带两端加了圆头端帽，结果端帽在角度上
+; 宽达 ±(capRadius / 中径) —— 半径 26px、中径 184px 时就是 ±8°，而扇区间隙只有 2°，
+; 相邻扇区的端帽必然互相压过去，屏幕上会出现一圈鼓包。直边才和"饼图分块"的直觉一致。
 ;
-; 几何上的关键点：端帽是以**中径**为圆心、带厚一半为半径的半圆。
-; 于是外弧端点恰好落在端帽圆上（距离 = bandOuter - bandMid = capRadius），
-; 内弧端点同理，两段弧与端帽自然接上，不需要额外补偿。
-; 附带一个很好用的不变量：**所有顶点到圆心的距离都在 [bandInner, bandOuter] 内**
-; （端帽最外侧到圆心的距离是 sqrt(bandMid² + capRadius²) < bandOuter），
-; 测试台直接断言它就能守住形状，不必逐点比对坐标。
-BuildArcBandPoints(center, bandInner, bandOuter, startAngle, sweepAngle) {
-    bandMid := (bandInner + bandOuter) / 2
-    capRadius := (bandOuter - bandInner) / 2
-    arcPoints := Max(6, Ceil(sweepAngle / 4))
-    capPoints := 6
-    points := []
-
-    ; 外弧：起角 → 止角
-    Loop, % arcPoints + 1 {
-        radian := (startAngle + (A_Index - 1) * sweepAngle / arcPoints) * 0.017453292519943
-        points.Push({x: Round(center + Cos(radian) * bandOuter), y: Round(center + Sin(radian) * bandOuter)})
-    }
-
-    endAngle := startAngle + sweepAngle
-    endRadian := endAngle * 0.017453292519943
-    capCenterX := center + Cos(endRadian) * bandMid
-    capCenterY := center + Sin(endRadian) * bandMid
-    ; 止端半圆：从外弧端点绕端帽外侧 180° 转到内弧端点
-    Loop, % capPoints + 1 {
-        radian := (endAngle + (A_Index - 1) * 180 / capPoints) * 0.017453292519943
-        points.Push({x: Round(capCenterX + Cos(radian) * capRadius), y: Round(capCenterY + Sin(radian) * capRadius)})
-    }
-
-    ; 内弧：止角 → 起角（反向走，保证多边形不自交）
-    Loop, % arcPoints + 1 {
-        radian := (endAngle - (A_Index - 1) * sweepAngle / arcPoints) * 0.017453292519943
-        points.Push({x: Round(center + Cos(radian) * bandInner), y: Round(center + Sin(radian) * bandInner)})
-    }
-
-    startRadian := startAngle * 0.017453292519943
-    capCenterX := center + Cos(startRadian) * bandMid
-    capCenterY := center + Sin(startRadian) * bandMid
-    ; 起端半圆：从内弧端点绕端帽外侧 180° 转回外弧起点
-    Loop, % capPoints + 1 {
-        radian := (startAngle + 180 + (A_Index - 1) * 180 / capPoints) * 0.017453292519943
-        points.Push({x: Round(capCenterX + Cos(radian) * capRadius), y: Round(capCenterY + Sin(radian) * capRadius)})
-    }
-    return points
-}
-
+; 两条可以直接断言的不变量（测试台在用）：
+;   1. 所有顶点到圆心的距离都落在 [innerRadius, outerRadius] 内；
+;   2. 所有顶点的角度都落在 [startAngle, startAngle + sweepAngle] 内 —— 这条才保证
+;      相邻扇区不会互相侵入，正是端帽版本漏掉的那个性质。
 BuildAnnularSectorPoints(center, outerRadius, innerRadius, startAngle, sweepAngle) {
     pointCount := Max(8, Ceil(sweepAngle / 4))
     points := []
