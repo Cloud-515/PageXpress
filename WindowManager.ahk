@@ -111,15 +111,22 @@ global g_RadialBandMid := 0
 global g_RadialBandThickness := 0
 global g_RadialHubPhysicalDiameter := 0
 global g_RadialHubDiameter := 0
+; 命中区的内边界（物理像素）= 中心舱那个可见圆边的半径。
+; 判定线与用户看到的东西严格重合：圆里是死区（松开即取消），圆外一律算选中。
+global g_RadialHitInnerRadius := 0
 RecomputeRadialMetrics()
 ; -------------------------------------------------------
 ; 轮盘外观（薄环带 + 扇区内图标/角标 + 圆形中心舱）
 ;
-; 核心设计决定：**视觉环带与命中区故意解耦**。
-;   命中区仍用 g_RadialInnerRadius ~ g_RadialOuterRadius 这一整圈（内径 0.645R），
-;   因为视觉变细不等于要用户瞄得更准 —— 鼠标只要落在扇区方向上就该选中。
+; 核心设计决定：**视觉与命中区故意解耦** —— 视觉细，命中区大。
 ;   视觉只画 g_RadialBandInner ~ g_RadialBandOuter 这条薄带，看起来轻得多。
+;   命中区则是"从中心舱圆边向外无限延伸的扇形"：外侧不封口、角向不留缝，
+;   鼠标只要朝某个方向离开中心舱就选中那个扇区，不必停在环上瞄准，甩过头也不会掉。
+;   （旧版判的是 g_RadialInnerRadius ~ g_RadialOuterRadius 那一圈，环带本来就只有
+;     几十像素宽，手一抖出了环或者落在扇区之间的缺口上，选中就没了。）
+;   完整规则见 UpdateRadialSelection 上方的说明。
 ; 每条扇区的两条边是直的径线（饼图那种分块），扇区之间留 g_RadialGapDegrees 的缺口。
+; 注意这个缺口只是视觉：它不参与命中判定，否则掠过边界会闪一下"未选中"。
 ;
 ; 全部几何都从 g_RadialOuterRadius 推导，集中在这里算一次：
 ; 环的大小只有一个来源，改了 RadialSize 重新调用即可（测试台就是这么验小尺寸排版的）。
@@ -128,7 +135,7 @@ RecomputeRadialMetrics() {
     global g_RadialOuterRadius, g_RadialInnerRadius
     global g_RadialBandInnerRatio, g_RadialBandOuterRatio
     global g_RadialBandInner, g_RadialBandOuter, g_RadialBandMid, g_RadialBandThickness
-    global g_RadialHubPhysicalDiameter, g_RadialHubDiameter
+    global g_RadialHubPhysicalDiameter, g_RadialHubDiameter, g_RadialHitInnerRadius
 
     g_RadialInnerRadius := Round(g_RadialOuterRadius * 0.645)
     g_RadialBandInner := Round(g_RadialOuterRadius * g_RadialBandInnerRatio)
@@ -141,12 +148,22 @@ RecomputeRadialMetrics() {
     ; 否则 125% 下这个圆会胀到压住环带。内容排版按逻辑尺寸设计，整体等比放大。
     g_RadialHubPhysicalDiameter := Round(g_RadialInnerRadius * 2 * 0.88)
     g_RadialHubDiameter := Round(g_RadialHubPhysicalDiameter * 96 / A_ScreenDPI)
+
+    ; 命中区的内边界就跟着这个圆走。中心舱的 Region 是椭圆、用的也是物理像素，
+    ; 所以这里的半径和屏幕上那个圆边是一一对应的，不存在 DPI 换算误差。
+    g_RadialHitInnerRadius := Round(g_RadialHubPhysicalDiameter / 2)
 }
 
 global g_RadialNormalColor := NormalizeColor(RadialNormalColor, "3A4658")
 global g_RadialSelectedColor := NormalizeColor(RadialSelectedColor, "4FC3F7")
 global g_RadialCenterColor := NormalizeColor(RadialCenterColor, "202833")
 global g_RadialGapDegrees := 2
+; 命中判定里两处"越界粘性"的宽容量（原理见 UpdateRadialSelection）。取值只跟手抖幅度
+; 有关、跟环的大小无关，所以是固定值：角度上 6° 抵消"正上方恰好压在分界线上"时两个扇区
+; 来回跳（9 个扇区时约占扇区宽度的 1/7，再多就会让换扇区显得迟钝）；退回中心舱时多走
+; 10px 才算取消，免得停在圆边犹豫时预览窗口反复升起、落下。
+global g_RadialStickyDegrees := 6
+global g_RadialStickyPixels := 10
 global g_RadialMenuPadding := 8
 global g_RadialHwnd := 0
 global g_RadialSectorHwnds := []
@@ -2081,27 +2098,64 @@ DestroyRadialMenu() {
     g_RadialIconControlHwnd := 0
 }
 
+; -------------------------------------------------------
+; 轮盘命中判定：唯一目标是"不用瞄准"。
+;
+; 命中区 = 从中心舱圆边向外无限延伸的扇形。三条规则：
+;   1. 外侧不封口。光标离中心多远都还算"朝着那个方向"，所以手甩过头、或者环本来就画得小，
+;      都不会掉成未选中。旧版内外都封口（0.645R ~ R 那一条几十像素宽的带子），
+;      于是"必须停在环上"才触发 —— 这正是它难用的地方。
+;   2. 内边界 = 中心舱的可见圆边（g_RadialHitInnerRadius）。圆里是死区，松开即取消；
+;      圆外一律算选中。判定线与屏幕上那个圆重合，不必猜"看着在外面、其实还在死区"。
+;   3. 角向不留缝。扇区之间那 2° 的视觉缺口不参与判定，按最近扇区算；否则光标掠过边界时
+;      会瞬间掉成"未选中"，预览窗口跟着收起再升起，屏幕上就是一闪。
+;
+; 两处粘性只作用于"换"，不影响"第一次选中"，所以从中心舱往外划的第一下依旧即时：
+;   · 已选中的扇区，越界 g_RadialStickyDegrees 之后才换；
+;   · 已选中时，退回中心舱要多走 g_RadialStickyPixels 才算取消。
+; 两条都是给手抖和"正上方恰好压在分界线上"准备的：没有它们，光标停在边界上时
+; 两个扇区（或"选中/未选中"）会每 16ms 翻一次，预览窗口随之反复升起、落下。
+; -------------------------------------------------------
+
+; 纯几何、不碰全局，参数全是显式传入的 —— 所以这段判定可以脱离整个脚本单独跑
+; （与 IsPointInMenuHoverArea 同一套路，本文件里改动命中区最容易被忽略的就是它）。
+; 返回扇区序号，0 = 未选中（回到中心舱即取消）。
+ResolveRadialSector(px, py, centerX, centerY, innerRadius, itemCount, currentSelection, stickyDegrees, stickyPixels) {
+    relativeX := px - centerX
+    relativeY := py - centerY
+    distance := Sqrt(relativeX * relativeX + relativeY * relativeY)
+
+    ; 已有选中时取消半径向内收一点：在圆边犹豫不该让预览窗口来回起落
+    cancelRadius := currentSelection ? (innerRadius - stickyPixels) : innerRadius
+    if (distance < cancelRadius)
+        return 0
+
+    angle := DllCall("msvcrt\atan2", "Double", relativeY, "Double", relativeX, "CDecl Double") * 57.295779513082
+    ; 平移到"从正上方起、顺时针"的角度制，和 ShowRadialMenu 里画扇区用的那套一致
+    angle := Mod(angle + 90 + 360, 360)
+    angleStep := 360 / itemCount
+    sectorIndex := Floor(angle / angleStep) + 1
+
+    if (currentSelection) {
+        centerAngle := (currentSelection - 1) * angleStep + angleStep / 2
+        ; 与已选中扇区中心的角差，规范化到 [0,180]；+360 是为了让 Mod 的入参恒为正
+        delta := Abs(Mod(angle - centerAngle + 180 + 360, 360) - 180)
+        if (delta <= angleStep / 2 + stickyDegrees)
+            return currentSelection
+    }
+    return sectorIndex
+}
+
 UpdateRadialSelection() {
-    global g_RadialCenterX, g_RadialCenterY, g_RadialInnerRadius, g_RadialOuterRadius
-    global g_RadialGapDegrees, g_RadialItems, g_RadialSelected
+    global g_RadialCenterX, g_RadialCenterY, g_RadialHitInnerRadius
+    global g_RadialStickyDegrees, g_RadialStickyPixels
+    global g_RadialItems, g_RadialSelected
 
     GetCursorScreenPos(mouseX, mouseY)
-    relativeX := mouseX - g_RadialCenterX
-    relativeY := mouseY - g_RadialCenterY
-    distance := Sqrt(relativeX * relativeX + relativeY * relativeY)
-    newSelection := 0
-
-    if (distance >= g_RadialInnerRadius && distance <= g_RadialOuterRadius) {
-        angle := DllCall("msvcrt\atan2", "Double", relativeY, "Double", relativeX, "CDecl Double") * 57.295779513082
-        angle := Mod(angle + 90 + 360, 360)
-        angleStep := 360 / g_RadialItems.Length()
-        sectorIndex := Floor(angle / angleStep) + 1
-        sectorStart := (sectorIndex - 1) * angleStep
-        localAngle := angle - sectorStart
-
-        if (localAngle >= g_RadialGapDegrees / 2 && localAngle <= angleStep - g_RadialGapDegrees / 2)
-            newSelection := sectorIndex
-    }
+    itemCount := g_RadialItems.Length()
+    newSelection := ResolveRadialSector(mouseX, mouseY, g_RadialCenterX, g_RadialCenterY
+        , g_RadialHitInnerRadius, itemCount, g_RadialSelected
+        , g_RadialStickyDegrees, g_RadialStickyPixels)
 
     if (newSelection != g_RadialSelected) {
         g_RadialSelected := newSelection
